@@ -23,8 +23,7 @@ const el = {
   btnRefreshVault: document.getElementById("btn-refresh-vault"),
   btnQuickOpen: document.getElementById("btn-quick-open"),
   btnToggleSidebar: document.getElementById("btn-toggle-sidebar"),
-  btnCollapseAll: document.getElementById("btn-collapse-all"),
-  btnExpandAll: document.getElementById("btn-expand-all"),
+  btnToggleFold: document.getElementById("btn-toggle-fold"),
   btnToggleRaw: document.getElementById("btn-toggle-raw"),
   btnToggleGraph: document.getElementById("btn-toggle-graph"),
   btnToggleTerminal: document.getElementById("btn-toggle-terminal"),
@@ -183,6 +182,7 @@ const editor = new BlockEditor(
       } else {
         delete state.prefs.collapsed_headings[key];
       }
+      syncFoldButton();
       persistPrefs();
     },
     onSavePastedImage: async (dataUrl) => {
@@ -232,6 +232,7 @@ const editor = new BlockEditor(
       return imageCache.get(imageCacheKey(src)) || "";
     },
     onAskAiBlock: (block) => aiPanel.attachBlock(block),
+    onAskAiBlocks: (blocks) => aiPanel.attachBlocks(blocks),
     onAskAiSelection: (selCtx) => aiPanel.attachSelection(selCtx),
     onCopyBlockLink: (bid) => copyBlockLink(bid),
   }
@@ -400,13 +401,25 @@ async function flushSave() {
   }
 }
 
+function syncFoldButton() {
+  if (!el.btnToggleFold) return;
+  const allCollapsed = editor.areVisibleHeadingsCollapsed();
+  el.btnToggleFold.textContent = allCollapsed ? "Expand" : "Collapse";
+  el.btnToggleFold.title = allCollapsed
+    ? "Expand All Headers (Ctrl+Shift+])"
+    : "Collapse All Headers (Ctrl+Shift+[)";
+  el.btnToggleFold.classList.toggle("active", allCollapsed);
+}
+
 function updateViewVisibility() {
   const hasVault = Boolean(state.vault);
   const hasFile = Boolean(state.currentFile);
   const showGraph = state.graphMode && hasVault;
 
-  el.btnCollapseAll.hidden = !hasFile || state.rawMode || showGraph;
-  el.btnExpandAll.hidden = !hasFile || state.rawMode || showGraph;
+  el.btnToggleFold.hidden = !hasFile || state.rawMode || showGraph;
+  if (!el.btnToggleFold.hidden) {
+    syncFoldButton();
+  }
   el.btnToggleRaw.hidden = !hasFile || showGraph;
   el.btnToggleRaw.classList.toggle("active", state.rawMode);
   el.btnToggleGraph.classList.toggle("active", showGraph);
@@ -856,8 +869,7 @@ el.btnQuickOpen.addEventListener("click", () => {
   if (state.vault) quickSwitcher.open();
 });
 el.btnToggleSidebar.addEventListener("click", toggleSidebar);
-el.btnCollapseAll.addEventListener("click", () => editor.collapseAll());
-el.btnExpandAll.addEventListener("click", () => editor.expandAll());
+el.btnToggleFold.addEventListener("click", () => editor.toggleCollapseAll());
 el.btnToggleRaw.addEventListener("click", toggleRawMode);
 el.btnToggleGraph.addEventListener("click", toggleGraphMode);
 el.btnToggleTerminal.addEventListener("click", () => terminal.toggle());
@@ -910,6 +922,51 @@ document.addEventListener("keydown", (e) => {
     }
   }
 
+  const activeEl = document.activeElement;
+  const isTypingField =
+    activeEl?.tagName === "INPUT" ||
+    activeEl?.tagName === "TEXTAREA" ||
+    activeEl?.isContentEditable;
+  const modalHidden = document.getElementById("input-modal")?.hidden !== false;
+
+  if (
+    !state.rawMode &&
+    !state.graphMode &&
+    state.currentFile &&
+    modalHidden &&
+    !quickSwitcher.isOpen() &&
+    !isTypingField &&
+    editor.hasBlockSelection()
+  ) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      editor.clearBlockSelection();
+      return;
+    }
+    if ((e.key === "Backspace" || e.key === "Delete") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      editor.deleteSelectedBlocks();
+      return;
+    }
+    if (e.key === "Tab" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      editor.outdentSelectedBlocks(e.shiftKey ? 1 : -1);
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === "c") {
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed) {
+        e.preventDefault();
+        const blocks = editor.getSelectedBlocks().map((x) => x.block);
+        invoke("serialize_blocks_to_md", { blocks })
+          .then((md) => navigator.clipboard.writeText(md))
+          .then(() => showToast(`Copied ${blocks.length} block${blocks.length === 1 ? "" : "s"}`))
+          .catch((err) => showToast(`Copy failed: ${err}`, true));
+        return;
+      }
+    }
+  }
+
   const mod = e.ctrlKey || e.metaKey;
   if (!mod) return;
 
@@ -923,6 +980,10 @@ document.addEventListener("keydown", (e) => {
     toggleGraphMode();
   } else if (key === "j" && !e.shiftKey) {
     e.preventDefault();
+    if (editor.hasBlockSelection() && !state.rawMode && !state.graphMode) {
+      aiPanel.attachBlocks(editor.getSelectedBlocks().map((x) => x.block));
+      return;
+    }
     const selCtx = editor.getSelectedTextContext();
     if (selCtx) {
       aiPanel.attachSelection(selCtx);
@@ -938,6 +999,11 @@ document.addEventListener("keydown", (e) => {
     e.preventDefault();
     aiPanel.toggle();
   } else if (key === "d" && !e.shiftKey && !state.rawMode) {
+    if (editor.hasBlockSelection()) {
+      e.preventDefault();
+      editor.duplicateSelectedBlocks();
+      return;
+    }
     const focused = editor.getFocusedBlock();
     if (focused) {
       e.preventDefault();

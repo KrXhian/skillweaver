@@ -192,6 +192,7 @@ export class BlockEditor {
       onResolveImageUrl,
       getCachedImageUrl,
       onAskAiBlock,
+      onAskAiBlocks,
       onAskAiSelection,
       onCopyBlockLink,
     }
@@ -210,11 +211,15 @@ export class BlockEditor {
     this.onResolveImageUrl = onResolveImageUrl;
     this.getCachedImageUrl = getCachedImageUrl;
     this.onAskAiBlock = onAskAiBlock;
+    this.onAskAiBlocks = onAskAiBlocks;
     this.onAskAiSelection = onAskAiSelection;
     this.onCopyBlockLink = onCopyBlockLink;
 
     this.blocks = [];
     this.collapsedIds = new Set();
+    this.selectedBlockIds = new Set();
+    this.lastSelectedBlockId = null;
+    this.menuTargetBlockId = null;
     this.undoStack = [];
     this.redoStack = [];
     this.pointerDrag = null;
@@ -323,7 +328,57 @@ export class BlockEditor {
         const row = e.target?.closest?.(".block-row");
         this.insertImageFromFile(imgFile, row?.dataset?.id || null);
       });
+      scrollEl.addEventListener("mousedown", (e) => {
+        if (
+          e.button === 0 &&
+          !e.ctrlKey &&
+          !e.metaKey &&
+          !e.shiftKey &&
+          !e.target.closest(".block-row") &&
+          this.selectedBlockIds.size > 0
+        ) {
+          this.clearBlockSelection();
+        }
+      });
     }
+
+    // Notion-style Ctrl+Click / Shift+Click multi-block selection
+    this.containerEl.addEventListener(
+      "mousedown",
+      (e) => {
+        if (e.button !== 0) return;
+        const row = e.target.closest(".block-row");
+        if (!row) return;
+
+        const mod = (e.ctrlKey || e.metaKey) && !e.altKey;
+        const shiftRange = e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && this.selectedBlockIds.size > 0;
+
+        if (mod || shiftRange) {
+          if (e.target.closest(".heading-toggle, .collapsed-badge, .code-copy-btn, .code-lang-select, .gutter-btn")) {
+            return;
+          }
+          e.preventDefault();
+          e.stopPropagation();
+          if (document.activeElement && this.containerEl.contains(document.activeElement)) {
+            document.activeElement.blur();
+          }
+          window.getSelection()?.removeAllRanges();
+          this.closeBlockMenu();
+          this.closeSlashMenu();
+          this.hideSelectionToolbar();
+          this.toggleBlockSelection(row.dataset.id, e.shiftKey);
+          return;
+        }
+
+        if (this.selectedBlockIds.size > 0) {
+          if (e.target.closest(".gutter-drag") && this.selectedBlockIds.has(row.dataset.id)) {
+            return;
+          }
+          this.clearBlockSelection();
+        }
+      },
+      true
+    );
   }
 
   loadDocument(blocks, collapsedIndices = []) {
@@ -331,6 +386,10 @@ export class BlockEditor {
       ? cloneBlocks(blocks)
       : [{ id: genBlockId(), type: "paragraph", content: "" }];
     this.collapsedIds = new Set();
+    this.selectedBlockIds.clear();
+    this.lastSelectedBlockId = null;
+    this.menuTargetBlockId = null;
+    this.containerEl.classList.remove("has-block-selection");
     for (const idx of collapsedIndices || []) {
       const b = this.blocks[idx];
       if (b && b.type === "heading") {
@@ -368,6 +427,30 @@ export class BlockEditor {
       const target = span.dataset.target || "";
       span.classList.toggle("page-link-missing", !lookup.has(target));
     });
+  }
+
+  areVisibleHeadingsCollapsed() {
+    const { visible } = this.computeVisibility();
+    let hasVisibleHeading = false;
+    for (let i = 0; i < this.blocks.length; i++) {
+      if (!visible[i]) continue;
+      const b = this.blocks[i];
+      if (b.type === "heading") {
+        hasVisibleHeading = true;
+        if (!this.collapsedIds.has(b.id)) {
+          return false;
+        }
+      }
+    }
+    return hasVisibleHeading;
+  }
+
+  toggleCollapseAll() {
+    if (this.areVisibleHeadingsCollapsed()) {
+      this.expandAll();
+    } else {
+      this.collapseAll();
+    }
   }
 
   collapseAll() {
@@ -412,6 +495,7 @@ export class BlockEditor {
     this.collapsedIds = new Set(prev.collapsed);
     this.render();
     this.onDirty();
+    this.onCollapseChange(this.getCollapsedIndices());
     return true;
   }
 
@@ -427,6 +511,7 @@ export class BlockEditor {
     this.collapsedIds = new Set(next.collapsed);
     this.render();
     this.onDirty();
+    this.onCollapseChange(this.getCollapsedIndices());
     return true;
   }
 
@@ -583,6 +668,9 @@ export class BlockEditor {
     if (block.type === "heading") {
       row.classList.add("block-heading", `block-heading-${Math.min(3, Math.max(1, block.level))}`);
     }
+    if (this.selectedBlockIds.has(block.id) || this.menuTargetBlockId === block.id) {
+      row.classList.add("block-selected");
+    }
 
     // Gutter (+ and ⋮⋮)
     const gutter = document.createElement("div");
@@ -606,6 +694,24 @@ export class BlockEditor {
       if (e.button !== 0) return;
       e.preventDefault();
       e.stopPropagation();
+      if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+        if (document.activeElement && this.containerEl.contains(document.activeElement)) {
+          document.activeElement.blur();
+        }
+        window.getSelection()?.removeAllRanges();
+        this.closeBlockMenu();
+        this.toggleBlockSelection(block.id, e.shiftKey);
+        return;
+      }
+      if (e.shiftKey && !e.altKey && this.selectedBlockIds.size > 0) {
+        if (document.activeElement && this.containerEl.contains(document.activeElement)) {
+          document.activeElement.blur();
+        }
+        window.getSelection()?.removeAllRanges();
+        this.closeBlockMenu();
+        this.toggleBlockSelection(block.id, true);
+        return;
+      }
       this.cleanupPointerDrag();
       try {
         dragBtn.setPointerCapture(e.pointerId);
@@ -1003,6 +1109,7 @@ export class BlockEditor {
       const linkSpan = e.target.closest(".page-link");
       if (linkSpan) {
         e.preventDefault();
+        if (e.ctrlKey || e.metaKey) return;
         const target = linkSpan.dataset.target;
         if (target) this.onOpenLink(target);
       }
@@ -1557,17 +1664,233 @@ export class BlockEditor {
     this.slashPopoverEl.innerHTML = "";
   }
 
+  /* Multi-Block Selection Helpers */
+  hasBlockSelection() {
+    return this.selectedBlockIds.size > 0;
+  }
+
+  getSelectedBlocks() {
+    this.syncAllEditableFromDom();
+    const out = [];
+    for (let i = 0; i < this.blocks.length; i++) {
+      const b = this.blocks[i];
+      if (this.selectedBlockIds.has(b.id)) {
+        out.push({ idx: i, block: { ...b } });
+      }
+    }
+    return out;
+  }
+
+  syncSelectedClasses() {
+    this.containerEl.classList.toggle("has-block-selection", this.selectedBlockIds.size > 0);
+    this.containerEl.querySelectorAll(".block-row").forEach((row) => {
+      const id = row.dataset.id;
+      const isSelected = this.selectedBlockIds.has(id) || this.menuTargetBlockId === id;
+      row.classList.toggle("block-selected", isSelected);
+    });
+  }
+
+  clearBlockSelection() {
+    if (this.selectedBlockIds.size === 0 && !this.lastSelectedBlockId) return;
+    this.selectedBlockIds.clear();
+    this.lastSelectedBlockId = null;
+    this.syncSelectedClasses();
+  }
+
+  toggleBlockSelection(blockId, extendRange = false) {
+    if (!blockId) return;
+    const { visible } = this.computeVisibility();
+
+    if (extendRange && this.lastSelectedBlockId) {
+      const anchorIdx = this.blocks.findIndex((b) => b.id === this.lastSelectedBlockId);
+      const targetIdx = this.blocks.findIndex((b) => b.id === blockId);
+      if (anchorIdx !== -1 && targetIdx !== -1) {
+        const start = Math.min(anchorIdx, targetIdx);
+        const end = Math.max(anchorIdx, targetIdx);
+        for (let i = start; i <= end; i++) {
+          if (visible[i]) {
+            this.selectedBlockIds.add(this.blocks[i].id);
+          }
+        }
+        this.lastSelectedBlockId = blockId;
+        this.syncSelectedClasses();
+        return;
+      }
+    }
+
+    if (this.selectedBlockIds.has(blockId)) {
+      this.selectedBlockIds.delete(blockId);
+    } else {
+      this.selectedBlockIds.add(blockId);
+    }
+    this.lastSelectedBlockId = blockId;
+    this.syncSelectedClasses();
+  }
+
+  deleteSelectedBlocks() {
+    if (this.selectedBlockIds.size === 0) return;
+    this.syncAllEditableFromDom();
+    const { hiddenCounts } = this.computeVisibility();
+    const removeIdxSet = new Set();
+
+    for (let i = 0; i < this.blocks.length; i++) {
+      const b = this.blocks[i];
+      if (!this.selectedBlockIds.has(b.id)) continue;
+      removeIdxSet.add(i);
+      if (b.type === "heading" && this.collapsedIds.has(b.id)) {
+        const hc = hiddenCounts[i] || 0;
+        for (let k = 1; k <= hc && i + k < this.blocks.length; k++) {
+          removeIdxSet.add(i + k);
+        }
+      }
+    }
+
+    if (removeIdxSet.size === 0) return;
+    this.pushUndoSnapshot();
+
+    const sortedRemove = Array.from(removeIdxSet).sort((a, b) => a - b);
+    const firstRemoved = sortedRemove[0];
+
+    for (const idx of sortedRemove) {
+      this.collapsedIds.delete(this.blocks[idx].id);
+    }
+
+    this.blocks = this.blocks.filter((_, idx) => !removeIdxSet.has(idx));
+    this.selectedBlockIds.clear();
+    this.lastSelectedBlockId = null;
+
+    if (this.blocks.length === 0) {
+      this.blocks.push({ id: genBlockId(), type: "paragraph", content: "" });
+      this.render(this.blocks[0].id, "start");
+    } else {
+      const focusIdx = Math.min(this.blocks.length - 1, Math.max(0, firstRemoved - 1));
+      this.render(this.blocks[focusIdx].id, "end");
+    }
+    this.onDirty();
+    this.onCollapseChange(this.getCollapsedIndices());
+  }
+
+  duplicateSelectedBlocks() {
+    const selected = this.getSelectedBlocks();
+    if (!selected.length) return;
+    this.pushUndoSnapshot();
+
+    const copies = selected.map(({ block }) => {
+      const copy = { ...block, id: genBlockId() };
+      delete copy.block_id;
+      return copy;
+    });
+
+    const insertAt = selected[selected.length - 1].idx + 1;
+    this.blocks.splice(insertAt, 0, ...copies);
+
+    this.selectedBlockIds = new Set(copies.map((c) => c.id));
+    this.lastSelectedBlockId = copies[copies.length - 1].id;
+    this.render();
+    this.syncSelectedClasses();
+    this.onDirty();
+    this.onCollapseChange(this.getCollapsedIndices());
+  }
+
+  outdentSelectedBlocks(delta) {
+    const selected = this.getSelectedBlocks();
+    if (!selected.length) return;
+    const { depths } = this.computeVisibility();
+
+    let changed = false;
+    const targets = selected.filter(({ block }) => block.type !== "heading");
+    if (!targets.length) return;
+
+    this.pushUndoSnapshot();
+    for (const { idx } of targets) {
+      const blk = this.blocks[idx];
+      if (!blk) continue;
+      if (delta > 0) {
+        if ((depths[idx] || 0) > 0) {
+          blk.outdent = (blk.outdent || 0) + 1;
+          changed = true;
+        }
+      } else if (delta < 0) {
+        if ((blk.outdent || 0) > 1) {
+          blk.outdent -= 1;
+          changed = true;
+        } else if (blk.outdent === 1) {
+          delete blk.outdent;
+          changed = true;
+        }
+      }
+    }
+
+    if (!changed) {
+      this.undoStack.pop();
+      return;
+    }
+
+    this.render();
+    this.syncSelectedClasses();
+    this.onDirty();
+    this.onCollapseChange(this.getCollapsedIndices());
+  }
+
   /* Gutter Block Menu */
   openBlockMenu(blockId, x, y) {
     this.syncAllEditableFromDom();
     const idx = this.blocks.findIndex((b) => b.id === blockId);
     if (idx === -1) return;
 
-    this.containerEl
-      .querySelectorAll(".block-row.block-selected")
-      .forEach((r) => r.classList.remove("block-selected"));
-    const targetRow = this.containerEl.querySelector(`.block-row[data-id="${CSS.escape(blockId)}"]`);
-    if (targetRow) targetRow.classList.add("block-selected");
+    this.menuTargetBlockId = blockId;
+    this.syncSelectedClasses();
+
+    if (this.selectedBlockIds.size > 1 && this.selectedBlockIds.has(blockId)) {
+      const count = this.selectedBlockIds.size;
+      const multiActions = [
+        {
+          label: `Ask AI (${count} blocks)`,
+          shortcut: "Ctrl+J",
+          run: () => this.onAskAiBlocks?.(this.getSelectedBlocks().map((x) => x.block)),
+        },
+        {
+          label: `Duplicate (${count} blocks)`,
+          shortcut: "Ctrl+D",
+          run: () => this.duplicateSelectedBlocks(),
+        },
+        { divider: true },
+        {
+          label: "Clear selection",
+          shortcut: "Esc",
+          run: () => this.clearBlockSelection(),
+        },
+        {
+          label: `Delete (${count} blocks)`,
+          shortcut: "Del",
+          danger: true,
+          run: () => this.deleteSelectedBlocks(),
+        },
+      ];
+
+      this.blockMenuEl.innerHTML = multiActions
+        .map((a, i) => {
+          if (a.divider) return `<div class="popover-divider"></div>`;
+          const cls = a.danger ? "popover-item danger" : "popover-item";
+          const sc = a.shortcut ? `<span class="popover-shortcut">${escapeHtml(a.shortcut)}</span>` : "";
+          return `<button class="${cls}" data-idx="${i}" role="menuitem"><span>${escapeHtml(a.label)}</span>${sc}</button>`;
+        })
+        .join("");
+
+      this.blockMenuEl.hidden = false;
+      const rect = this.blockMenuEl.getBoundingClientRect();
+      this.blockMenuEl.style.left = `${Math.min(x, window.innerWidth - rect.width - 8)}px`;
+      this.blockMenuEl.style.top = `${Math.min(y, window.innerHeight - rect.height - 8)}px`;
+
+      this.blockMenuEl.querySelectorAll(".popover-item").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const item = multiActions[Number(btn.dataset.idx)];
+          this.closeBlockMenu();
+          if (item?.run) item.run();
+        });
+      });
+      return;
+    }
 
     const block = this.blocks[idx];
     const actions = [
@@ -1639,9 +1962,8 @@ export class BlockEditor {
   closeBlockMenu() {
     this.blockMenuEl.hidden = true;
     this.blockMenuEl.innerHTML = "";
-    this.containerEl
-      .querySelectorAll(".block-row.block-selected")
-      .forEach((r) => r.classList.remove("block-selected"));
+    this.menuTargetBlockId = null;
+    this.syncSelectedClasses();
   }
 
   ensureBlockId(idx) {
@@ -1971,13 +2293,39 @@ export class BlockEditor {
       }
 
       const { hiddenCounts, depths } = this.computeVisibility();
+      const isMultiGroup =
+        this.selectedBlockIds.has(drag.blockId) && this.selectedBlockIds.size > 1;
+      const dragIdxSet = new Set();
+
+      if (isMultiGroup) {
+        for (let i = 0; i < this.blocks.length; i++) {
+          const b = this.blocks[i];
+          if (!this.selectedBlockIds.has(b.id)) continue;
+          dragIdxSet.add(i);
+          if (b.type === "heading" && this.collapsedIds.has(b.id)) {
+            const hc = hiddenCounts[i] || 0;
+            for (let k = 1; k <= hc && i + k < this.blocks.length; k++) {
+              dragIdxSet.add(i + k);
+            }
+          }
+        }
+      } else {
+        const singleCount =
+          this.blocks[sourceIdx].type === "heading" && this.collapsedIds.has(drag.blockId)
+            ? 1 + hiddenCounts[sourceIdx]
+            : 1;
+        for (let k = 0; k < singleCount; k++) {
+          dragIdxSet.add(sourceIdx + k);
+        }
+      }
+
       drag.sourceIdx = sourceIdx;
+      drag.isMultiGroup = isMultiGroup;
+      drag.dragIdxSet = dragIdxSet;
+      drag.dragIndices = Array.from(dragIdxSet).sort((a, b) => a - b);
       drag.startDepth = depths[sourceIdx] || 0;
       drag.desiredOutdent = null;
-      drag.dragCount =
-        this.blocks[sourceIdx].type === "heading" && this.collapsedIds.has(drag.blockId)
-          ? 1 + hiddenCounts[sourceIdx]
-          : 1;
+      drag.dragCount = drag.dragIndices.length;
       drag.started = true;
 
       const sourceRow = this.containerEl.querySelector(
@@ -1986,7 +2334,12 @@ export class BlockEditor {
       drag.ghostEl = this.createDragGhost(sourceRow, this.blocks[sourceIdx], drag.dragCount);
 
       document.body.classList.add("is-dragging-block");
-      if (sourceRow) sourceRow.classList.add("dragging");
+      for (const draggedIdx of drag.dragIndices) {
+        const bId = this.blocks[draggedIdx]?.id;
+        if (!bId) continue;
+        const r = this.containerEl.querySelector(`.block-row[data-id="${CSS.escape(bId)}"]`);
+        if (r) r.classList.add("dragging");
+      }
       this.scheduleEdgeScroll();
     }
 
@@ -1998,6 +2351,23 @@ export class BlockEditor {
     }
 
     this.updateDropSlot(e.clientX, e.clientY);
+  }
+
+  isDropNoOp(insertIdx, drag) {
+    if (!drag.isMultiGroup) {
+      return insertIdx >= drag.sourceIdx && insertIdx <= drag.sourceIdx + drag.dragCount;
+    }
+    const remaining = [];
+    for (let i = 0; i < this.blocks.length; i++) {
+      if (!drag.dragIdxSet.has(i)) remaining.push(i);
+    }
+    const removedBefore = drag.dragIndices.filter((i) => i < insertIdx).length;
+    const insertAt = Math.max(0, Math.min(remaining.length, insertIdx - removedBefore));
+    remaining.splice(insertAt, 0, ...drag.dragIndices);
+    for (let i = 0; i < remaining.length; i++) {
+      if (remaining[i] !== i) return false;
+    }
+    return true;
   }
 
   updateDropSlot(clientX, clientY) {
@@ -2031,8 +2401,7 @@ export class BlockEditor {
         block &&
         block.type === "heading" &&
         this.collapsedIds.has(block.id) &&
-        info.idx !== drag.sourceIdx &&
-        (info.idx < drag.sourceIdx || info.idx >= drag.sourceIdx + drag.dragCount)
+        !drag.dragIdxSet.has(info.idx)
       ) {
         const topZone = info.rect.top + info.rect.height * 0.25;
         const bottomZone = info.rect.bottom - info.rect.height * 0.25;
@@ -2040,7 +2409,7 @@ export class BlockEditor {
           info.row.classList.add("drop-inside");
           this.dropIndicatorEl.hidden = true;
           drag.insertIndex = info.idx + 1;
-          drag.desiredOutdent = 0;
+          drag.desiredOutdent = drag.isMultiGroup ? null : 0;
           return;
         }
       }
@@ -2072,13 +2441,12 @@ export class BlockEditor {
 
     const containerRect = this.containerEl.getBoundingClientRect();
     const draggedBlock = this.blocks[drag.sourceIdx];
-    const isSameVerticalSpot =
-      best.insertIdx >= drag.sourceIdx && best.insertIdx <= drag.sourceIdx + drag.dragCount;
+    const isSameSpot = this.isDropNoOp(best.insertIdx, drag);
     const dx = clientX - drag.startX;
     const baseHandleX = drag.startX - (drag.startDepth || 0) * INDENT_STEP_PX;
 
-    if (isSameVerticalSpot) {
-      if (!draggedBlock || draggedBlock.type === "heading" || Math.abs(dx) < 14) {
+    if (isSameSpot) {
+      if (drag.isMultiGroup || !draggedBlock || draggedBlock.type === "heading" || Math.abs(dx) < 14) {
         this.dropIndicatorEl.hidden = true;
         drag.insertIndex = null;
         drag.desiredOutdent = null;
@@ -2088,8 +2456,7 @@ export class BlockEditor {
       const naturalDepth = this.computeDropDepth(
         drag.sourceIdx,
         draggedBlock,
-        drag.sourceIdx,
-        drag.dragCount
+        drag.dragIdxSet
       );
       const currentDepth = Math.max(0, naturalDepth - (draggedBlock.outdent || 0));
       const candidateDepth = Math.max(
@@ -2118,12 +2485,11 @@ export class BlockEditor {
 
     const naturalDepth = this.computeDropDepth(
       best.insertIdx,
-      draggedBlock,
-      drag.sourceIdx,
-      drag.dragCount
+      drag.isMultiGroup ? this.blocks[drag.dragIndices[0]] : draggedBlock,
+      drag.dragIdxSet
     );
     let targetDepth = naturalDepth;
-    if (draggedBlock && draggedBlock.type !== "heading" && dx <= -14) {
+    if (!drag.isMultiGroup && draggedBlock && draggedBlock.type !== "heading" && dx <= -14) {
       targetDepth = Math.max(
         0,
         Math.min(naturalDepth, Math.round((clientX - baseHandleX) / INDENT_STEP_PX))
@@ -2137,13 +2503,15 @@ export class BlockEditor {
     this.dropIndicatorEl.hidden = false;
     drag.insertIndex = best.insertIdx;
     drag.desiredOutdent =
-      draggedBlock && draggedBlock.type !== "heading" ? Math.max(0, naturalDepth - targetDepth) : 0;
+      !drag.isMultiGroup && draggedBlock && draggedBlock.type !== "heading"
+        ? Math.max(0, naturalDepth - targetDepth)
+        : null;
   }
 
-  computeDropDepth(insertIdx, draggedBlock, sourceIdx, dragCount) {
+  computeDropDepth(insertIdx, draggedBlock, dragIdxSet) {
     const headingStack = [];
     for (let i = 0; i < insertIdx && i < this.blocks.length; i++) {
-      if (i >= sourceIdx && i < sourceIdx + dragCount) continue;
+      if (dragIdxSet?.has(i)) continue;
       const b = this.blocks[i];
       if (b.type === "heading") {
         while (headingStack.length > 0 && headingStack[headingStack.length - 1] >= b.level) {
@@ -2201,7 +2569,7 @@ export class BlockEditor {
       return;
     }
 
-    const { sourceIdx, dragCount, insertIndex, desiredOutdent } = drag;
+    const { sourceIdx, isMultiGroup, dragIdxSet, dragIndices, insertIndex, desiredOutdent } = drag;
     this.cleanupPointerDrag();
 
     if (insertIndex === null) return;
@@ -2209,8 +2577,9 @@ export class BlockEditor {
     if (!draggedBlock) return;
 
     const currentOutdent = draggedBlock.outdent || 0;
-    const isReorder = insertIndex < sourceIdx || insertIndex > sourceIdx + dragCount;
+    const isReorder = !this.isDropNoOp(insertIndex, { sourceIdx, dragCount: dragIndices.length, isMultiGroup, dragIdxSet, dragIndices });
     const isOutdentChange =
+      !isMultiGroup &&
       draggedBlock.type !== "heading" &&
       desiredOutdent !== null &&
       desiredOutdent !== undefined &&
@@ -2218,22 +2587,30 @@ export class BlockEditor {
 
     if (isReorder || isOutdentChange) {
       this.pushUndoSnapshot();
-      const targetOutdent =
-        draggedBlock.type !== "heading" && desiredOutdent !== null && desiredOutdent !== undefined
-          ? desiredOutdent
-          : currentOutdent;
-      if (draggedBlock.type !== "heading") {
-        if (targetOutdent > 0) {
-          draggedBlock.outdent = targetOutdent;
+      if (isOutdentChange) {
+        if (desiredOutdent > 0) {
+          draggedBlock.outdent = desiredOutdent;
         } else {
           delete draggedBlock.outdent;
         }
       }
       if (isReorder) {
-        const moved = this.blocks.splice(sourceIdx, dragCount);
-        const adjusted = insertIndex > sourceIdx ? insertIndex - dragCount : insertIndex;
-        this.blocks.splice(adjusted, 0, ...moved);
-        this.render(moved[0].id, "end");
+        const remaining = [];
+        const moved = [];
+        for (let i = 0; i < this.blocks.length; i++) {
+          if (dragIdxSet.has(i)) moved.push(this.blocks[i]);
+          else remaining.push(this.blocks[i]);
+        }
+        const removedBefore = dragIndices.filter((i) => i < insertIndex).length;
+        const insertAt = Math.max(0, Math.min(remaining.length, insertIndex - removedBefore));
+        remaining.splice(insertAt, 0, ...moved);
+        this.blocks = remaining;
+        if (isMultiGroup) {
+          this.render();
+          this.syncSelectedClasses();
+        } else {
+          this.render(moved[0].id, "end");
+        }
       } else {
         this.render(draggedBlock.id, "end");
       }

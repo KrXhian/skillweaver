@@ -373,6 +373,28 @@ export class AiPanel {
     this.renderChips();
   }
 
+  attachBlocks(blocks) {
+    if (!Array.isArray(blocks) || !blocks.length) return;
+    for (const block of blocks) {
+      if (!block) continue;
+      const bid = block.block_id ? `^${block.block_id}` : block.id;
+      const preview = summarizeBlockPayload(block).replace(/\s+/g, " ").trim().slice(0, 40) || block.type;
+      const id = `blk:${bid}`;
+      if (!this.pinnedAttachments.some((a) => a.id === id)) {
+        this.pinnedAttachments.push({
+          id,
+          kind: "block",
+          label: `${block.type}: ${preview}`,
+          blockId: block.id,
+          obsidianId: block.block_id || null,
+          text: summarizeBlockPayload(block),
+        });
+      }
+    }
+    this.open();
+    this.renderChips();
+  }
+
   attachSelection({ blockId, block, text }) {
     const clean = String(text || "").trim();
     if (!clean) return;

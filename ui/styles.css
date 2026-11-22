@@ -613,9 +613,24 @@ body.is-dragging-tree * {
   border-radius: var(--radius-sm);
 }
 
+.blocks-container.has-block-selection {
+  user-select: none;
+}
+
 .block-row.block-selected > .block-main {
   background: var(--accent-bg);
+  box-shadow: inset 0 0 0 1px var(--accent-border);
   border-radius: var(--radius-sm);
+}
+
+.block-row.block-selected .block-code-card {
+  border-color: var(--accent-border);
+  box-shadow: 0 0 0 1px var(--accent-bg);
+}
+
+.block-row.block-selected .block-image-el {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .block-row.block-highlight-flash > .block-main {
