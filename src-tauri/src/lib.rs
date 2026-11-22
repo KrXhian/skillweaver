@@ -43,6 +43,7 @@ pub fn run() {
             commands::save_ai_prefs,
             commands::ai_chat_stream,
             commands::ai_cancel_stream,
+            commands::ai_list_models,
             commands::search_vault,
             commands::resolve_block_reference,
             commands::get_vault_graph,

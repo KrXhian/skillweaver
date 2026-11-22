@@ -1,4 +1,4 @@
-use crate::ai::{self, AiChatRequest, AiPrefs, AiState};
+use crate::ai::{self, AiChatRequest, AiListModelsRequest, AiModelInfo, AiPrefs, AiState};
 use crate::markdown::{self, Block};
 use crate::prefs::{self, UiPrefs};
 use crate::terminal::{TerminalStartPayload, TerminalState};
@@ -392,6 +392,13 @@ pub fn ai_chat_stream(
 pub fn ai_cancel_stream(ai_state: State<'_, AiState>) -> Result<(), String> {
     ai::cancel_stream(&ai_state);
     Ok(())
+}
+
+#[tauri::command]
+pub async fn ai_list_models(request: AiListModelsRequest) -> Result<Vec<AiModelInfo>, String> {
+    tauri::async_runtime::spawn_blocking(move || ai::list_models(&request))
+        .await
+        .map_err(|e| format!("Model list task failed: {e}"))?
 }
 
 #[tauri::command]

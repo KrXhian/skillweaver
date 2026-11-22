@@ -59,6 +59,19 @@ pub struct AiStreamEvent {
     pub text: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AiModelInfo {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AiListModelsRequest {
+    pub provider: String,
+    pub api_key: String,
+    pub base_url: String,
+}
+
 /// Holds the PID of any currently streaming `curl` process so it can be cancelled cleanly.
 #[derive(Default)]
 pub struct AiState {
@@ -283,6 +296,9 @@ pub fn parse_sse_delta(provider: &str, data_line: &str) -> Option<String> {
                 .as_array()?;
             let mut out = String::new();
             for p in parts {
+                if p.get("thought").and_then(Value::as_bool) == Some(true) {
+                    continue;
+                }
                 if let Some(t) = p.get("text").and_then(Value::as_str) {
                     out.push_str(t);
                 }
@@ -399,7 +415,7 @@ pub fn start_chat_stream(
 
     let curl_bin = if cfg!(windows) { "curl.exe" } else { "curl" };
     let mut cmd = Command::new(curl_bin);
-    cmd.args(["-sS", "-N", "--max-time", "180", "-K", "-", "--data-binary"])
+    cmd.args(["-sS", "-N", "--connect-timeout", "20", "--max-time", "180", "-K", "-", "--data-binary"])
         .arg(format!("@{}", tmp_path.display()))
         .args(["-w", &format!("\n{HTTP_STATUS_MARKER}%{{http_code}}\n")])
         .stdin(Stdio::piped())
@@ -558,6 +574,288 @@ pub fn cancel_stream(ai_state: &AiState) {
     }
 }
 
+/// Builds the provider URL and headers for listing live available models.
+pub fn build_list_models_request(
+    req: &AiListModelsRequest,
+) -> Result<(String, Vec<(String, String)>), String> {
+    let provider = req.provider.trim().to_ascii_lowercase();
+    let api_key = req.api_key.trim();
+    let base = req.base_url.trim().trim_end_matches('/');
+
+    match provider.as_str() {
+        "gemini" => {
+            if api_key.is_empty() {
+                return Err("Enter your Google Gemini API key first".to_string());
+            }
+            let root = if base.is_empty() {
+                "https://generativelanguage.googleapis.com/v1beta"
+            } else {
+                base
+            };
+            Ok((
+                format!("{root}/models?pageSize=100"),
+                vec![("x-goog-api-key".to_string(), api_key.to_string())],
+            ))
+        }
+        "anthropic" => {
+            if api_key.is_empty() {
+                return Err("Enter your Anthropic API key first".to_string());
+            }
+            let url = if base.is_empty() {
+                "https://api.anthropic.com/v1/models".to_string()
+            } else if let Some(prefix) = base.strip_suffix("/messages") {
+                format!("{prefix}/models")
+            } else if base.ends_with("/models") {
+                base.to_string()
+            } else {
+                format!("{base}/models")
+            };
+            Ok((
+                url,
+                vec![
+                    ("x-api-key".to_string(), api_key.to_string()),
+                    ("anthropic-version".to_string(), "2023-06-01".to_string()),
+                ],
+            ))
+        }
+        "ollama" => {
+            let root = if base.is_empty() {
+                "http://localhost:11434"
+            } else {
+                base.strip_suffix("/v1/chat/completions")
+                    .or_else(|| base.strip_suffix("/chat/completions"))
+                    .or_else(|| base.strip_suffix("/api/tags"))
+                    .or_else(|| base.strip_suffix("/v1"))
+                    .unwrap_or(base)
+            };
+            Ok((format!("{root}/api/tags"), Vec::new()))
+        }
+        "openai" | "openrouter" | "custom" => {
+            if provider != "custom" && api_key.is_empty() {
+                return Err(format!("Enter your {} API key first", req.provider));
+            }
+            let default_url = if provider == "openrouter" {
+                "https://openrouter.ai/api/v1/models"
+            } else {
+                "https://api.openai.com/v1/models"
+            };
+            let url = if base.is_empty() {
+                default_url.to_string()
+            } else if let Some(prefix) = base.strip_suffix("/chat/completions") {
+                format!("{prefix}/models")
+            } else if let Some(prefix) = base.strip_suffix("/completions") {
+                format!("{prefix}/models")
+            } else if base.ends_with("/models") {
+                base.to_string()
+            } else {
+                format!("{base}/models")
+            };
+            let mut headers = Vec::new();
+            if !api_key.is_empty() {
+                headers.push(("Authorization".to_string(), format!("Bearer {api_key}")));
+            }
+            Ok((url, headers))
+        }
+        other => Err(format!("Unsupported AI provider: {other}")),
+    }
+}
+
+/// Parses a provider's model-listing JSON response into normalized `AiModelInfo` items.
+pub fn parse_models_response(provider: &str, body: &str) -> Result<Vec<AiModelInfo>, String> {
+    let val: Value =
+        serde_json::from_str(body).map_err(|e| format!("Invalid model list JSON: {e}"))?;
+    let p = provider.trim().to_ascii_lowercase();
+    let mut models = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    match p.as_str() {
+        "gemini" => {
+            if let Some(arr) = val.get("models").and_then(Value::as_array) {
+                for item in arr {
+                    let supports_chat = item
+                        .get("supportedGenerationMethods")
+                        .and_then(Value::as_array)
+                        .map(|methods| {
+                            methods
+                                .iter()
+                                .any(|m| m.as_str() == Some("generateContent"))
+                        })
+                        .unwrap_or(true);
+                    if !supports_chat {
+                        continue;
+                    }
+                    let Some(raw_name) = item.get("name").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let id = raw_name.strip_prefix("models/").unwrap_or(raw_name).trim();
+                    if id.is_empty() {
+                        continue;
+                    }
+                    let lower = id.to_ascii_lowercase();
+                    if lower.contains("embedding")
+                        || lower.contains("aqa")
+                        || lower.contains("imagen")
+                        || lower.contains("veo")
+                        || lower.contains("-tts")
+                    {
+                        continue;
+                    }
+                    let label = item
+                        .get("displayName")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or(id)
+                        .to_string();
+                    if seen.insert(id.to_string()) {
+                        models.push(AiModelInfo {
+                            id: id.to_string(),
+                            label,
+                        });
+                    }
+                }
+            }
+            models.sort_by(|a, b| {
+                let rank = |id: &str| -> u8 {
+                    let l = id.to_ascii_lowercase();
+                    if l.contains("flash-lite") {
+                        0
+                    } else if l.contains("flash") {
+                        1
+                    } else if l.contains("gemini") {
+                        2
+                    } else {
+                        3
+                    }
+                };
+                rank(&a.id).cmp(&rank(&b.id)).then_with(|| b.id.cmp(&a.id))
+            });
+        }
+        "ollama" => {
+            if let Some(arr) = val.get("models").and_then(Value::as_array) {
+                for item in arr {
+                    let Some(name) = item
+                        .get("name")
+                        .or_else(|| item.get("model"))
+                        .and_then(Value::as_str)
+                    else {
+                        continue;
+                    };
+                    let id = name.trim();
+                    if !id.is_empty() && seen.insert(id.to_string()) {
+                        models.push(AiModelInfo {
+                            id: id.to_string(),
+                            label: id.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+        _ => {
+            if let Some(arr) = val.get("data").and_then(Value::as_array) {
+                for item in arr {
+                    let Some(raw_id) = item.get("id").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let id = raw_id.trim();
+                    if id.is_empty() {
+                        continue;
+                    }
+                    let label = item
+                        .get("display_name")
+                        .or_else(|| item.get("name"))
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or(id)
+                        .to_string();
+                    if seen.insert(id.to_string()) {
+                        models.push(AiModelInfo {
+                            id: id.to_string(),
+                            label,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(models)
+}
+
+/// Fetches the live model list from the configured provider via `curl.exe` with secrets passed via stdin.
+pub fn list_models(req: &AiListModelsRequest) -> Result<Vec<AiModelInfo>, String> {
+    let (url, headers) = build_list_models_request(req)?;
+    let mut config_stdin = format!("url = {}\n", escape_curl_config_value(&url));
+    for (k, v) in &headers {
+        let header_line = format!("{k}: {v}");
+        config_stdin.push_str(&format!("header = {}\n", escape_curl_config_value(&header_line)));
+    }
+
+    let curl_bin = if cfg!(windows) { "curl.exe" } else { "curl" };
+    let mut cmd = Command::new(curl_bin);
+    cmd.args([
+        "-sS",
+        "--connect-timeout",
+        "12",
+        "--max-time",
+        "25",
+        "-K",
+        "-",
+        "-w",
+        &format!("\n{HTTP_STATUS_MARKER}%{{http_code}}\n"),
+    ])
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to launch {curl_bin}: {e}"))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(config_stdin.as_bytes());
+        let _ = stdin.flush();
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("Failed waiting for {curl_bin}: {e}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut http_status: u16 = 0;
+    let mut body_lines = Vec::new();
+    for line in stdout.lines() {
+        if let Some(code_str) = line.strip_prefix(HTTP_STATUS_MARKER) {
+            if let Ok(code) = code_str.trim().parse::<u16>() {
+                http_status = code;
+            }
+        } else {
+            body_lines.push(line);
+        }
+    }
+    let body = body_lines.join("\n");
+
+    if http_status >= 400 {
+        return Err(format!(
+            "HTTP {http_status}: {}",
+            extract_http_error_message(&body)
+        ));
+    }
+    if !output.status.success() && body.trim().is_empty() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "Failed to fetch models".to_string()
+        } else {
+            stderr
+        });
+    }
+
+    parse_models_response(&req.provider, &body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -666,5 +964,61 @@ mod tests {
     fn extract_http_error_message_reads_nested_json() {
         let body = r#"{"error":{"message":"Invalid API key provided"}}"#;
         assert_eq!(extract_http_error_message(body), "Invalid API key provided");
+    }
+
+    #[test]
+    fn list_models_request_builders_and_parsers_work() {
+        let (gem_url, gem_headers) = build_list_models_request(&AiListModelsRequest {
+            provider: "gemini".into(),
+            api_key: "AIzaSecret".into(),
+            base_url: "".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            gem_url,
+            "https://generativelanguage.googleapis.com/v1beta/models?pageSize=100"
+        );
+        assert!(gem_headers
+            .iter()
+            .any(|(k, v)| k == "x-goog-api-key" && v == "AIzaSecret"));
+
+        let (ollama_url, _) = build_list_models_request(&AiListModelsRequest {
+            provider: "ollama".into(),
+            api_key: "".into(),
+            base_url: "http://localhost:11434/v1/chat/completions".into(),
+        })
+        .unwrap();
+        assert_eq!(ollama_url, "http://localhost:11434/api/tags");
+
+        let gem_json = r#"{
+            "models": [
+                {"name": "models/gemini-3.8-flash", "displayName": "Gemini 3.8 Flash", "supportedGenerationMethods": ["generateContent"]},
+                {"name": "models/gemini-3.5-flash-lite", "displayName": "Gemini 3.5 Flash-Lite", "supportedGenerationMethods": ["generateContent"]},
+                {"name": "models/text-embedding-004", "displayName": "Embedding 004", "supportedGenerationMethods": ["embedContent"]}
+            ]
+        }"#;
+        let gem_models = parse_models_response("gemini", gem_json).unwrap();
+        assert_eq!(gem_models.len(), 2);
+        assert_eq!(gem_models[0].id, "gemini-3.5-flash-lite");
+        assert_eq!(gem_models[1].id, "gemini-3.8-flash");
+
+        let oa_json = r#"{"data":[{"id":"gpt-4o-mini"},{"id":"gpt-4o"}]}"#;
+        let oa_models = parse_models_response("openai", oa_json).unwrap();
+        assert_eq!(oa_models.len(), 2);
+        assert_eq!(oa_models[0].id, "gpt-4o-mini");
+
+        let ol_json = r#"{"models":[{"name":"llama3.2:latest"},{"name":"qwen2.5-coder:7b"}]}"#;
+        let ol_models = parse_models_response("ollama", ol_json).unwrap();
+        assert_eq!(ol_models.len(), 2);
+        assert_eq!(ol_models[1].id, "qwen2.5-coder:7b");
+
+        // Thought parts from Gemini thinking models should not leak into visible text deltas
+        assert_eq!(
+            parse_sse_delta(
+                "gemini",
+                r#"{"candidates":[{"content":{"parts":[{"text":"internal","thought":true},{"text":"Visible"}]}}]}"#
+            ),
+            Some("Visible".to_string())
+        );
     }
 }

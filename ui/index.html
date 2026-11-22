@@ -225,13 +225,11 @@
       <div class="ai-header">
         <div class="ai-header-left">
           <span class="ai-title">AI Assistant</span>
+          <button id="ai-model-badge" class="ai-model-badge" type="button" title="Switch AI model"></button>
         </div>
         <div class="ai-header-actions">
-          <button id="ai-btn-settings" class="icon-btn" title="API Key & Provider Settings" aria-label="AI Settings">
-            <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35">
-              <circle cx="8" cy="8" r="2.2"/>
-              <path d="M8 1.8v1.5M8 12.7v1.5M1.8 8h1.5M12.7 8h1.5M3.6 3.6l1.1 1.1M11.3 11.3l1.1 1.1M12.4 3.6l-1.1 1.1M4.7 11.3l-1.1 1.1"/>
-            </svg>
+          <button id="ai-btn-settings" class="top-text-btn ai-settings-btn" title="API Key, Provider &amp; Model Settings" aria-label="AI Settings">
+            Settings
           </button>
           <button id="ai-btn-clear" class="icon-btn" title="New Chat" aria-label="Clear Chat">
             <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
@@ -245,6 +243,8 @@
           </button>
         </div>
       </div>
+
+      <div id="ai-model-popover" class="popover ai-model-popover" hidden role="listbox" aria-label="Switch AI model"></div>
 
       <div id="ai-settings-drawer" class="ai-settings-drawer" hidden>
         <label class="ai-field">
@@ -267,7 +267,11 @@
         </label>
         <label class="ai-field">
           <span>Model</span>
-          <input id="ai-model" type="text" placeholder="e.g. gpt-4o-mini" autocomplete="off" />
+          <div class="ai-model-row">
+            <input id="ai-model" type="text" placeholder="e.g. gemini-3.5-flash-lite" autocomplete="off" />
+            <button id="ai-btn-pick-model" class="top-text-btn ai-model-icon-btn" type="button" title="Show available models">▾</button>
+            <button id="ai-btn-fetch-models" class="top-text-btn ai-model-icon-btn" type="button" title="Fetch live models from provider">↻</button>
+          </div>
         </label>
         <label class="ai-field">
           <span>Base URL</span>
@@ -281,6 +285,7 @@
       <div id="ai-messages" class="ai-messages"></div>
 
       <div class="ai-composer">
+        <div id="ai-mention-popover" class="popover ai-mention-popover" hidden role="listbox" aria-label="Mention page"></div>
         <div id="ai-context-chips" class="ai-context-chips"></div>
         <div class="ai-input-box">
           <textarea id="ai-input" class="ai-input" rows="1" placeholder="Ask about this note, highlights, or folder..."></textarea>
@@ -301,6 +306,20 @@
     <button id="btn-sel-highlight" class="sel-btn" title="Highlight (==text==)"><mark class="inline-highlight">H</mark></button>
     <button id="btn-sel-ai" class="sel-btn sel-btn-ai" title="Ask AI (Ctrl+J)">Ask AI</button>
   </div>
+
+  <!-- Floating Multi-Block Selection Action Bar -->
+  <div id="block-selection-bar" class="block-selection-bar" hidden role="toolbar" aria-label="Selected blocks actions">
+    <span id="block-sel-count" class="block-sel-count">1 block</span>
+    <span class="block-sel-sep"></span>
+    <button id="btn-blocks-ask-ai" class="sel-btn sel-btn-ai" title="Ask AI about selected blocks (Ctrl+J)">Ask AI</button>
+    <button id="btn-blocks-outdent" class="sel-btn" title="Outdent selected blocks (Shift+Tab)">Outdent</button>
+    <button id="btn-blocks-dup" class="sel-btn" title="Duplicate selected blocks (Ctrl+D)">Duplicate</button>
+    <button id="btn-blocks-del" class="sel-btn block-sel-danger" title="Delete selected blocks (Del)">Delete</button>
+    <button id="btn-blocks-clear" class="sel-btn" title="Clear selection (Esc)" aria-label="Clear selection">×</button>
+  </div>
+
+  <!-- Drag Marquee Selection Box -->
+  <div id="block-marquee" class="block-marquee" hidden></div>
 
   <!-- @@ Link Autocomplete Popover -->
   <div id="link-popover" class="popover link-popover" hidden role="listbox" aria-label="Link to page"></div>

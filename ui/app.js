@@ -168,6 +168,14 @@ const editor = new BlockEditor(
     linkPopoverEl: document.getElementById("link-popover"),
     slashPopoverEl: document.getElementById("slash-popover"),
     blockMenuEl: document.getElementById("block-menu"),
+    blockSelectionBarEl: document.getElementById("block-selection-bar"),
+    blockSelectionCountEl: document.getElementById("block-sel-count"),
+    blocksAskAiBtn: document.getElementById("btn-blocks-ask-ai"),
+    blocksOutdentBtn: document.getElementById("btn-blocks-outdent"),
+    blocksDupBtn: document.getElementById("btn-blocks-dup"),
+    blocksDelBtn: document.getElementById("btn-blocks-del"),
+    blocksClearBtn: document.getElementById("btn-blocks-clear"),
+    blockMarqueeEl: document.getElementById("block-marquee"),
   },
   {
     getPages: () => state.vault?.pages || [],
@@ -232,9 +240,10 @@ const editor = new BlockEditor(
       return imageCache.get(imageCacheKey(src)) || "";
     },
     onAskAiBlock: (block) => aiPanel.attachBlock(block),
-    onAskAiBlocks: (blocks) => aiPanel.attachBlocks(blocks),
+    onAskAiBlocks: (blocks) => aiPanel.focusOnHighlightedBlocks(blocks),
     onAskAiSelection: (selCtx) => aiPanel.attachSelection(selCtx),
     onCopyBlockLink: (bid) => copyBlockLink(bid),
+    onBlockSelectionChange: (blocks) => aiPanel.syncLiveSelection(blocks),
   }
 );
 
@@ -243,6 +252,8 @@ const aiPanel = new AiPanel(
     panelEl: document.getElementById("ai-panel"),
     resizerEl: document.getElementById("ai-resizer"),
     toggleBtn: el.btnToggleAi,
+    modelBadgeEl: document.getElementById("ai-model-badge"),
+    modelPopoverEl: document.getElementById("ai-model-popover"),
     settingsBtn: document.getElementById("ai-btn-settings"),
     clearBtn: document.getElementById("ai-btn-clear"),
     closeBtn: document.getElementById("ai-btn-close"),
@@ -252,9 +263,12 @@ const aiPanel = new AiPanel(
     toggleKeyVisBtn: document.getElementById("ai-toggle-key"),
     baseUrlInput: document.getElementById("ai-base-url"),
     modelInput: document.getElementById("ai-model"),
+    pickModelBtn: document.getElementById("ai-btn-pick-model"),
+    fetchModelsBtn: document.getElementById("ai-btn-fetch-models"),
     saveSettingsBtn: document.getElementById("ai-save-settings"),
     messagesEl: document.getElementById("ai-messages"),
     chipsEl: document.getElementById("ai-context-chips"),
+    mentionPopoverEl: document.getElementById("ai-mention-popover"),
     inputEl: document.getElementById("ai-input"),
     sendBtn: document.getElementById("ai-send-btn"),
     stopBtn: document.getElementById("ai-stop-btn"),
@@ -266,6 +280,7 @@ const aiPanel = new AiPanel(
       pages: state.vault?.pages || [],
       currentFile: state.currentFile,
       blocks: state.currentFile ? editor.getBlocks() : [],
+      selectedBlocks: state.currentFile ? editor.getSelectedBlocksForAi() : [],
     }),
     onResizeEnd: (width) => {
       state.prefs.ai_panel_width = width;
@@ -292,6 +307,7 @@ const aiPanel = new AiPanel(
     },
     onOpenLink: (target) => handleOpenLink(target),
     onToast: (msg, isErr) => showToast(msg, isErr),
+    onClearEditorSelection: () => editor.clearBlockSelection(),
   }
 );
 
@@ -423,6 +439,14 @@ function updateViewVisibility() {
   el.btnToggleRaw.hidden = !hasFile || showGraph;
   el.btnToggleRaw.classList.toggle("active", state.rawMode);
   el.btnToggleGraph.classList.toggle("active", showGraph);
+
+  const bar = document.getElementById("block-selection-bar");
+  if (!hasFile || state.rawMode || showGraph) {
+    if (bar) bar.hidden = true;
+    if (!hasFile) aiPanel.syncLiveSelection([]);
+  } else {
+    editor.updateBlockSelectionBar();
+  }
 
   if (showGraph) {
     el.welcomeView.hidden = true;
@@ -885,6 +909,7 @@ el.docTitle.addEventListener("dblclick", () => {
 });
 
 el.bottomClickZone.addEventListener("click", () => {
+  if (editor.consumeSuppressedBottomClick()) return;
   if (state.currentFile && !state.rawMode) {
     editor.focusBottomOrCreate();
   }
@@ -981,7 +1006,7 @@ document.addEventListener("keydown", (e) => {
   } else if (key === "j" && !e.shiftKey) {
     e.preventDefault();
     if (editor.hasBlockSelection() && !state.rawMode && !state.graphMode) {
-      aiPanel.attachBlocks(editor.getSelectedBlocks().map((x) => x.block));
+      aiPanel.focusOnHighlightedBlocks(editor.getSelectedBlocksForAi());
       return;
     }
     const selCtx = editor.getSelectedTextContext();
