@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Skillweaver</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app" class="app-shell">
+    <!-- Left Sidebar -->
+    <aside id="sidebar" class="sidebar" aria-label="Folder explorer">
+      <div class="sidebar-header">
+        <button id="btn-vault-name" class="vault-title-btn" title="Open another folder (Ctrl+O)">
+          <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+            <path d="M1.5 3.5h4.2l1.4 1.5h7.4v7.5a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z"/>
+          </svg>
+          <span id="vault-name" class="vault-name">No Folder</span>
+        </button>
+        <div class="sidebar-actions">
+          <button id="btn-open-folder" class="icon-btn" title="Open Folder (Ctrl+O)" aria-label="Open Folder">
+            <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+              <path d="M1.5 4h4l1.3 1.3h7.7v7.2H1.5z"/>
+              <path d="M8 7v3.5M6.2 8.7L8 7l1.8 1.7"/>
+            </svg>
+          </button>
+          <button id="btn-new-note" class="icon-btn" title="New Note (Ctrl+N)" aria-label="New Note">
+            <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+              <path d="M3 2h6.5L13 5.5V14H3z"/>
+              <path d="M9.5 2v3.5H13M8 7.5v4M6 9.5h4"/>
+            </svg>
+          </button>
+          <button id="btn-new-folder" class="icon-btn" title="New Folder" aria-label="New Folder">
+            <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+              <path d="M1.5 3.5h4.2l1.4 1.5h7.4v8h-13z"/>
+              <path d="M8 7.2v3.6M6.2 9h3.6"/>
+            </svg>
+          </button>
+          <button id="btn-refresh-vault" class="icon-btn" title="Refresh Folder" aria-label="Refresh Folder">
+            <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+              <path d="M13 4.5A5.5 5.5 0 1 0 13.5 9"/>
+              <path d="M13.5 2v3h-3"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <div id="file-tree" class="file-tree" role="tree"></div>
+
+      <div class="sidebar-footer">
+        <button id="btn-quick-open" class="sidebar-footer-btn" title="Quick Switcher (Ctrl+P)">
+          <span>Quick Open</span>
+          <kbd>Ctrl+P</kbd>
+        </button>
+      </div>
+    </aside>
+
+    <!-- Sidebar Resizer -->
+    <div id="sidebar-resizer" class="sidebar-resizer" role="separator" aria-orientation="vertical"></div>
+
+    <!-- Main Editor Pane -->
+    <main id="main" class="main-pane">
+      <header class="topbar">
+        <div class="topbar-left">
+          <button id="btn-toggle-sidebar" class="icon-btn" title="Toggle Sidebar (Ctrl+\)" aria-label="Toggle Sidebar">
+            <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+              <rect x="2" y="2.5" width="12" height="11" rx="1.5"/>
+              <path d="M6 2.5v11"/>
+            </svg>
+          </button>
+          <div id="breadcrumb" class="breadcrumb">Skillweaver</div>
+        </div>
+
+        <div class="topbar-right">
+          <span id="save-status" class="save-status" aria-live="polite"></span>
+          <button id="btn-collapse-all" class="top-text-btn" title="Collapse All Headers (Ctrl+Shift+[)" hidden>
+            Collapse
+          </button>
+          <button id="btn-expand-all" class="top-text-btn" title="Expand All Headers (Ctrl+Shift+])" hidden>
+            Expand
+          </button>
+          <button id="btn-toggle-raw" class="top-text-btn" title="Toggle Raw Markdown (Ctrl+Shift+M)" hidden>
+            MD
+          </button>
+          <button id="btn-toggle-graph" class="icon-btn" title="Graph View (Ctrl+G)" aria-label="Graph View">
+            <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35">
+              <path d="M4.3 4.6L11 4.2M4.1 5.1L7.3 11.1M11.4 4.8L8.4 11.1"/>
+              <circle cx="3.5" cy="4.5" r="1.6"/>
+              <circle cx="12" cy="4" r="1.6"/>
+              <circle cx="7.8" cy="12" r="1.7"/>
+            </svg>
+          </button>
+          <button id="btn-toggle-terminal" class="icon-btn" title="Toggle Terminal (Ctrl+~)" aria-label="Toggle Terminal">
+            <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+              <rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/>
+              <path d="M4.2 6.2L6.6 8 4.2 9.8M8 10h3.6"/>
+            </svg>
+          </button>
+          <button id="btn-toggle-ai" class="icon-btn" title="AI Assistant (Ctrl+J / Ctrl+Shift+A)" aria-label="Toggle AI Assistant">
+            <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+              <path d="M8 1.8l1.4 3.8L13.2 7l-3.8 1.4L8 12.2 6.6 8.4 2.8 7l3.8-1.4z"/>
+              <path d="M12.5 11.2l.6 1.5 1.5.6-1.5.6-.6 1.5-.6-1.5-1.5-.6 1.5-.6z"/>
+            </svg>
+          </button>
+          <button id="btn-toggle-theme" class="icon-btn" title="Toggle Dark/Light Theme" aria-label="Toggle Theme">
+            <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+              <circle cx="8" cy="8" r="3.2"/>
+              <path d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M12.6 3.4l-1.1 1.1M4.5 11.5l-1.1 1.1"/>
+            </svg>
+          </button>
+        </div>
+      </header>
+
+      <div class="workspace-body">
+        <!-- Welcome / Empty View -->
+        <section id="welcome-view" class="welcome-view">
+          <div class="welcome-card">
+            <h1>Skillweaver</h1>
+            <p id="welcome-subtitle" class="welcome-subtitle">
+              Lightweight Notion-style block editor over plain <code>.md</code> folders.
+            </p>
+            <div class="welcome-actions">
+              <button id="btn-welcome-open" class="primary-btn">Open Folder <kbd>Ctrl+O</kbd></button>
+              <button id="btn-welcome-new" class="secondary-btn" hidden>New Note <kbd>Ctrl+N</kbd></button>
+            </div>
+            <div class="cheat-sheet">
+              <div class="cheat-row"><kbd># </kbd><span>Collapsible Header (<code>#</code>, <code>##</code>, <code>###</code>)</span></div>
+              <div class="cheat-row"><kbd>Ctrl+B</kbd><span>Bold text &amp; <code>`inline code`</code></span></div>
+              <div class="cheat-row"><kbd>```</kbd><span>Fenced Code Block</span></div>
+              <div class="cheat-row"><kbd>@@</kbd><span>Link any <code>.md</code> page (Obsidian <code>[[wikilinks]]</code>)</span></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Block Editor Canvas -->
+        <div id="editor-scroll" class="editor-scroll" hidden>
+          <div class="document-sheet">
+            <div id="doc-header" class="doc-header">
+              <h1 id="doc-title" class="doc-title" title="Double-click to rename file"></h1>
+              <div id="doc-path-hint" class="doc-path-hint"></div>
+            </div>
+
+            <div id="blocks-container" class="blocks-container"></div>
+
+            <div id="bottom-click-zone" class="bottom-click-zone" title="Click to add a block"></div>
+
+            <section id="backlinks-section" class="backlinks-section" hidden>
+              <button id="backlinks-toggle" class="backlinks-toggle" aria-expanded="true">
+                <svg class="chevron-icon" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5">
+                  <path d="M3 4.5L6 7.5L9 4.5"/>
+                </svg>
+                <span>Backlinks</span>
+                <span id="backlinks-count" class="backlinks-count">0</span>
+              </button>
+              <div id="backlinks-list" class="backlinks-list"></div>
+            </section>
+          </div>
+        </div>
+
+        <!-- Raw Markdown View -->
+        <div id="raw-editor-view" class="raw-editor-view" hidden>
+          <textarea id="raw-textarea" class="raw-textarea" spellcheck="false" placeholder="Write Markdown..."></textarea>
+        </div>
+
+        <!-- Obsidian-Style Knowledge Graph View -->
+        <section id="graph-view" class="graph-view" aria-label="Knowledge Graph View" hidden>
+          <canvas id="graph-canvas" class="graph-canvas"></canvas>
+          <div class="graph-controls">
+            <input id="graph-filter" class="graph-filter-input" type="search" placeholder="Filter notes..." autocomplete="off" />
+            <button id="graph-local-toggle" class="graph-pill-btn" title="Toggle Local 1-Hop Graph">Local</button>
+            <button id="graph-orphans-toggle" class="graph-pill-btn active" title="Show Unlinked Notes">Orphans</button>
+            <button id="graph-refresh" class="icon-btn" title="Re-layout Graph" aria-label="Refresh Graph">
+              <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+                <path d="M13 4.5A5.5 5.5 0 1 0 13.5 9"/>
+                <path d="M13.5 2v3h-3"/>
+              </svg>
+            </button>
+            <span id="graph-stats" class="graph-stats">0 notes · 0 links</span>
+          </div>
+          <div class="graph-zoom-controls">
+            <button id="graph-zoom-in" class="graph-zoom-btn" title="Zoom In">+</button>
+            <button id="graph-zoom-out" class="graph-zoom-btn" title="Zoom Out">-</button>
+            <button id="graph-zoom-fit" class="graph-zoom-btn" title="Fit Graph to View">Fit</button>
+          </div>
+        </section>
+      </div>
+
+      <!-- Integrated Bottom Terminal -->
+      <div id="terminal-resizer" class="terminal-resizer" role="separator" aria-orientation="horizontal" hidden></div>
+      <section id="terminal-panel" class="terminal-panel" aria-label="Integrated Terminal" hidden>
+        <div class="terminal-header">
+          <div class="terminal-header-left">
+            <span class="terminal-title">TERMINAL</span>
+            <span id="terminal-cwd-badge" class="terminal-cwd-badge"></span>
+          </div>
+          <div class="terminal-header-actions">
+            <button id="btn-term-clear" class="icon-btn" title="Clear Terminal (Ctrl+L)" aria-label="Clear Terminal">
+              <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+                <path d="M3 4h10M5.5 4V2.5h5V4M4.5 4l.8 9.5h5.4L11.5 4"/>
+              </svg>
+            </button>
+            <button id="btn-term-restart" class="icon-btn" title="Interrupt / Restart Shell (Ctrl+C)" aria-label="Restart Terminal">
+              <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+                <path d="M13 4.5A5.5 5.5 0 1 0 13.5 9"/>
+                <path d="M13.5 2v3h-3"/>
+              </svg>
+            </button>
+            <button id="btn-term-close" class="icon-btn" title="Close Terminal (Ctrl+~)" aria-label="Close Terminal">
+              <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+                <path d="M4 4l8 8M12 4l-8 8"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+        <div id="terminal-scroll" class="terminal-scroll">
+          <div id="terminal-output" class="terminal-output"></div>
+          <div class="terminal-prompt-row">
+            <span id="terminal-prompt-prefix" class="terminal-prompt-prefix">PS &gt;</span>
+            <input id="terminal-input" class="terminal-input" type="text" spellcheck="false" autocomplete="off" placeholder="Type a command..." />
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Right-Side AI Assistant Drawer -->
+    <div id="ai-resizer" class="ai-resizer" role="separator" aria-orientation="vertical" hidden></div>
+    <aside id="ai-panel" class="ai-panel" aria-label="AI Assistant" hidden>
+      <div class="ai-header">
+        <div class="ai-header-left">
+          <span class="ai-title">AI Assistant</span>
+        </div>
+        <div class="ai-header-actions">
+          <button id="ai-btn-settings" class="icon-btn" title="API Key & Provider Settings" aria-label="AI Settings">
+            <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35">
+              <circle cx="8" cy="8" r="2.2"/>
+              <path d="M8 1.8v1.5M8 12.7v1.5M1.8 8h1.5M12.7 8h1.5M3.6 3.6l1.1 1.1M11.3 11.3l1.1 1.1M12.4 3.6l-1.1 1.1M4.7 11.3l-1.1 1.1"/>
+            </svg>
+          </button>
+          <button id="ai-btn-clear" class="icon-btn" title="New Chat" aria-label="Clear Chat">
+            <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+              <path d="M3 4h10M5.5 4V2.5h5V4M4.5 4l.8 9.5h5.4L11.5 4"/>
+            </svg>
+          </button>
+          <button id="ai-btn-close" class="icon-btn" title="Close AI Panel (Ctrl+Shift+A)" aria-label="Close AI">
+            <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M4 4l8 8M12 4l-8 8"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <div id="ai-settings-drawer" class="ai-settings-drawer" hidden>
+        <label class="ai-field">
+          <span>Provider</span>
+          <select id="ai-provider">
+            <option value="openai">OpenAI</option>
+            <option value="gemini">Google Gemini</option>
+            <option value="anthropic">Anthropic (Claude)</option>
+            <option value="openrouter">OpenRouter</option>
+            <option value="ollama">Ollama (Local)</option>
+            <option value="custom">Custom (OpenAI-compatible)</option>
+          </select>
+        </label>
+        <label class="ai-field">
+          <span>API Key <small>(stored in ~/.skillweaver/ai.prefs)</small></span>
+          <div class="ai-key-row">
+            <input id="ai-api-key" type="password" placeholder="Paste your API key..." autocomplete="off" />
+            <button id="ai-toggle-key" class="top-text-btn" type="button" title="Show/Hide Key">Eye</button>
+          </div>
+        </label>
+        <label class="ai-field">
+          <span>Model</span>
+          <input id="ai-model" type="text" placeholder="e.g. gpt-4o-mini" autocomplete="off" />
+        </label>
+        <label class="ai-field">
+          <span>Base URL</span>
+          <input id="ai-base-url" type="text" placeholder="https://..." autocomplete="off" />
+        </label>
+        <div class="ai-settings-actions">
+          <button id="ai-save-settings" class="primary-btn" type="button">Save Settings</button>
+        </div>
+      </div>
+
+      <div id="ai-messages" class="ai-messages"></div>
+
+      <div class="ai-composer">
+        <div id="ai-context-chips" class="ai-context-chips"></div>
+        <div class="ai-input-box">
+          <textarea id="ai-input" class="ai-input" rows="1" placeholder="Ask about this note, highlights, or folder..."></textarea>
+          <div class="ai-send-row">
+            <span class="ai-send-hint">Enter to send · Shift+Enter newline</span>
+            <button id="ai-send-btn" class="primary-btn ai-send-btn" type="button">Send</button>
+            <button id="ai-stop-btn" class="secondary-btn ai-send-btn" type="button" hidden>Stop</button>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- Floating Text Selection Toolbar -->
+  <div id="selection-toolbar" class="selection-toolbar" hidden role="toolbar" aria-label="Text formatting">
+    <button id="btn-sel-bold" class="sel-btn" title="Bold (Ctrl+B)"><strong>B</strong></button>
+    <button id="btn-sel-code" class="sel-btn" title="Inline Code (Ctrl+E)"><code>&lt;/&gt;</code></button>
+    <button id="btn-sel-highlight" class="sel-btn" title="Highlight (==text==)"><mark class="inline-highlight">H</mark></button>
+    <button id="btn-sel-ai" class="sel-btn sel-btn-ai" title="Ask AI (Ctrl+J)">Ask AI</button>
+  </div>
+
+  <!-- @@ Link Autocomplete Popover -->
+  <div id="link-popover" class="popover link-popover" hidden role="listbox" aria-label="Link to page"></div>
+
+  <!-- Minimal Slash Block Menu -->
+  <div id="slash-popover" class="popover slash-popover" hidden role="listbox" aria-label="Insert block"></div>
+
+  <!-- Block Gutter Menu -->
+  <div id="block-menu" class="popover block-menu" hidden role="menu"></div>
+
+  <!-- Sidebar Context Menu -->
+  <div id="context-menu" class="popover context-menu" hidden role="menu"></div>
+
+  <!-- Ctrl+P Quick Switcher Modal -->
+  <div id="quick-switcher" class="modal-backdrop" hidden>
+    <div class="modal-panel quick-switcher-panel" role="dialog" aria-label="Quick Switcher">
+      <input id="quick-switcher-input" class="quick-switcher-input" type="text" placeholder="Jump to markdown note..." autocomplete="off" />
+      <div id="quick-switcher-list" class="quick-switcher-list" role="listbox"></div>
+    </div>
+  </div>
+
+  <!-- Input / Confirm Modal -->
+  <div id="input-modal" class="modal-backdrop" hidden>
+    <div class="modal-panel input-modal-panel" role="dialog" aria-modal="true">
+      <h2 id="input-modal-title" class="input-modal-title"></h2>
+      <p id="input-modal-desc" class="input-modal-desc" hidden></p>
+      <input id="input-modal-field" class="input-modal-field" type="text" autocomplete="off" />
+      <div class="input-modal-actions">
+        <button id="input-modal-cancel" class="secondary-btn">Cancel</button>
+        <button id="input-modal-confirm" class="primary-btn">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Notification -->
+  <div id="toast" class="toast" hidden role="status"></div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
