@@ -252,6 +252,11 @@ const aiPanel = new AiPanel(
     panelEl: document.getElementById("ai-panel"),
     resizerEl: document.getElementById("ai-resizer"),
     toggleBtn: el.btnToggleAi,
+    historyBtn: document.getElementById("ai-btn-history"),
+    historyDrawerEl: document.getElementById("ai-history-drawer"),
+    newChatBtn: document.getElementById("ai-btn-new-chat"),
+    historySearchEl: document.getElementById("ai-history-search"),
+    historyListEl: document.getElementById("ai-history-list"),
     modelBadgeEl: document.getElementById("ai-model-badge"),
     modelPopoverEl: document.getElementById("ai-model-popover"),
     settingsBtn: document.getElementById("ai-btn-settings"),
@@ -266,6 +271,8 @@ const aiPanel = new AiPanel(
     pickModelBtn: document.getElementById("ai-btn-pick-model"),
     fetchModelsBtn: document.getElementById("ai-btn-fetch-models"),
     saveSettingsBtn: document.getElementById("ai-save-settings"),
+    turnRailEl: document.getElementById("ai-turn-rail"),
+    turnPreviewEl: document.getElementById("ai-turn-preview"),
     messagesEl: document.getElementById("ai-messages"),
     chipsEl: document.getElementById("ai-context-chips"),
     mentionPopoverEl: document.getElementById("ai-mention-popover"),
@@ -276,6 +283,7 @@ const aiPanel = new AiPanel(
   {
     invoke,
     getCurrentContext: () => ({
+      vaultPath: state.vault?.root_path || "",
       vaultName: state.vault?.root_name || "",
       pages: state.vault?.pages || [],
       currentFile: state.currentFile,
@@ -308,6 +316,14 @@ const aiPanel = new AiPanel(
     onOpenLink: (target) => handleOpenLink(target),
     onToast: (msg, isErr) => showToast(msg, isErr),
     onClearEditorSelection: () => editor.clearBlockSelection(),
+    onPromptRenameChat: (chat) =>
+      modal.prompt({
+        title: "Rename Conversation",
+        description: "Set a title for this AI conversation:",
+        defaultValue: chat.title || "",
+        placeholder: "Conversation title...",
+        confirmLabel: "Save",
+      }),
   }
 );
 
@@ -534,6 +550,7 @@ async function applyVaultSnapshot(snapshot, openInitial = true) {
   if (openInitial && snapshot.root_path) {
     terminal.syncCwd(snapshot.root_path);
   }
+  aiPanel.refreshHistoryView();
 }
 
 async function openNote(relPath) {

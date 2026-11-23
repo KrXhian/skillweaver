@@ -52,6 +52,35 @@ function formatCacheAge(fetchedAtUnix) {
   return `Synced ${Math.floor(diff / 86400)}d ago`;
 }
 
+function formatRelativeAge(unixSec) {
+  if (!unixSec) return "";
+  const diff = Math.max(0, Math.floor(Date.now() / 1000) - unixSec);
+  if (diff < 60) return "now";
+  if (diff < 3600) return `${Math.floor(diff / 60)}m`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
+  if (diff < 86400 * 7) return `${Math.floor(diff / 86400)}d`;
+  return `${Math.floor(diff / (86400 * 7))}w`;
+}
+
+function formatClockTime(unixOrMs) {
+  if (!unixOrMs) return "";
+  const ms = unixOrMs < 1e12 ? unixOrMs * 1000 : unixOrMs;
+  try {
+    return new Date(ms).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  } catch {
+    return "";
+  }
+}
+
+function deriveChatTitle(prompt) {
+  const clean = String(prompt || "")
+    .replace(/\[\[([^\]|\n]+)(?:\|([^\]\n]+))?\]\]/g, (_, target, label) => label || displayNameForLink(target))
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!clean) return "New Conversation";
+  return clean.length > 48 ? `${clean.slice(0, 47)}…` : clean;
+}
+
 function tauriListen(eventName, handler) {
   const listenFn = window.__TAURI__?.event?.listen;
   if (!listenFn) return Promise.resolve(() => {});
@@ -115,6 +144,11 @@ export class AiPanel {
       panelEl,
       resizerEl,
       toggleBtn,
+      historyBtn,
+      historyDrawerEl,
+      newChatBtn,
+      historySearchEl,
+      historyListEl,
       modelBadgeEl,
       modelPopoverEl,
       settingsBtn,
@@ -129,6 +163,8 @@ export class AiPanel {
       pickModelBtn,
       fetchModelsBtn,
       saveSettingsBtn,
+      turnRailEl,
+      turnPreviewEl,
       messagesEl,
       chipsEl,
       mentionPopoverEl,
@@ -145,11 +181,17 @@ export class AiPanel {
       onOpenLink,
       onToast,
       onClearEditorSelection,
+      onPromptRenameChat,
     }
   ) {
     this.panelEl = panelEl;
     this.resizerEl = resizerEl;
     this.toggleBtn = toggleBtn;
+    this.historyBtn = historyBtn;
+    this.historyDrawerEl = historyDrawerEl;
+    this.newChatBtn = newChatBtn;
+    this.historySearchEl = historySearchEl;
+    this.historyListEl = historyListEl;
     this.modelBadgeEl = modelBadgeEl;
     this.modelPopoverEl = modelPopoverEl;
     this.settingsBtn = settingsBtn;
@@ -160,6 +202,8 @@ export class AiPanel {
     this.modelInput = modelInput;
     this.pickModelBtn = pickModelBtn;
     this.fetchModelsBtn = fetchModelsBtn;
+    this.turnRailEl = turnRailEl;
+    this.turnPreviewEl = turnPreviewEl;
     this.messagesEl = messagesEl;
     this.chipsEl = chipsEl;
     this.mentionPopoverEl = mentionPopoverEl;
@@ -175,6 +219,7 @@ export class AiPanel {
     this.onOpenLink = onOpenLink;
     this.onToast = onToast;
     this.onClearEditorSelection = onClearEditorSelection;
+    this.onPromptRenameChat = onPromptRenameChat;
 
     this.openState = false;
     this.prefs = {
@@ -189,7 +234,21 @@ export class AiPanel {
     this.searchFolder = true;
     this.pinnedAttachments = []; // { id, kind: "block"|"selection", label, blockId, text }
     this.liveSelectedBlocks = [];
-    this.messages = []; // { id, role, content, error?, proposalStates? }
+    this.messages = []; // { id, role, content, createdAt?, error?, proposalStates? }
+    this.chats = [];
+    this.chatsLoaded = false;
+    this.activeChatId = null;
+    this.activeChatTitle = "";
+    this.activeChatPinned = false;
+    this.activeChatCreatedAt = 0;
+    this.activeChatVaultPath = "";
+    this.activeChatVaultName = "";
+    this.historyOpen = false;
+    this.historyFilter = "";
+    this.activeTurnIdx = 0;
+    this._turns = [];
+    this._turnPreviewTimer = null;
+    this._scrollRaf = null;
     this.activeRequestId = null;
     this.isStreaming = false;
     this.modelsCache = {}; // cacheKey -> { fetched_at_unix, models }
@@ -208,6 +267,12 @@ export class AiPanel {
     };
 
     settingsBtn.addEventListener("click", () => this.toggleSettings());
+    this.historyBtn?.addEventListener("click", () => this.toggleHistory());
+    this.newChatBtn?.addEventListener("click", () => this.startNewChat());
+    this.historySearchEl?.addEventListener("input", () => {
+      this.historyFilter = this.historySearchEl.value.trim().toLowerCase();
+      this.renderHistoryDrawer();
+    });
     this.modelBadgeEl?.addEventListener("click", (e) => {
       e.stopPropagation();
       this.toggleModelPopover("header");
@@ -221,8 +286,14 @@ export class AiPanel {
       this.openModelPopover("settings", true);
       await this.fetchLiveModels(this.providerSelect.value, false);
     });
-    clearBtn.addEventListener("click", () => this.clearChat());
+    clearBtn.addEventListener("click", () => this.startNewChat());
     closeBtn.addEventListener("click", () => this.close());
+
+    this.messagesEl.addEventListener("scroll", () => this.scheduleActiveTurnUpdate(), { passive: true });
+    this.turnRailEl?.addEventListener("mouseleave", () => {
+      clearTimeout(this._turnPreviewTimer);
+      this._turnPreviewTimer = setTimeout(() => this.hideTurnPreview(), 90);
+    });
 
     toggleKeyVisBtn.addEventListener("click", () => {
       this.apiKeyInput.type = this.apiKeyInput.type === "password" ? "text" : "password";
@@ -718,6 +789,7 @@ export class AiPanel {
     this.sendBtn.hidden = false;
     this.stopBtn.hidden = true;
     this.renderMessages(true);
+    this.persistActiveChat();
   }
 
   initResizer() {
@@ -763,15 +835,30 @@ export class AiPanel {
   async ensurePrefsLoaded() {
     if (this.prefsLoaded) return;
     try {
-      const [loaded, cachedModels] = await Promise.all([
+      const [loaded, cachedModels, chats] = await Promise.all([
         this.invoke("get_ai_prefs"),
         this.invoke("get_cached_models").catch(() => ({})),
+        this.invoke("ai_list_chats").catch(() => []),
       ]);
       if (loaded) {
         this.prefs = { ...this.prefs, ...loaded };
       }
       if (cachedModels && typeof cachedModels === "object") {
         this.modelsCache = cachedModels;
+      }
+      if (Array.isArray(chats)) {
+        this.chats = chats;
+        this.chatsLoaded = true;
+        if (!this.activeChatId && this.messages.length === 0 && chats.length > 0) {
+          const ctx = this.getCurrentContext?.() || {};
+          const matchingVault = ctx.vaultPath
+            ? chats.find((c) => c.vault_path === ctx.vaultPath)
+            : null;
+          const targetChat = matchingVault || chats[0];
+          if (targetChat?.id) {
+            await this.openChat(targetChat.id, false);
+          }
+        }
       }
       this.prefsLoaded = true;
       this.syncSettingsInputs();
@@ -815,6 +902,7 @@ export class AiPanel {
     this.toggleBtn?.classList.remove("active");
     this.closeMentionPopover();
     this.closeModelPopover();
+    this.hideTurnPreview();
   }
 
   closeMentionPopover() {
@@ -918,6 +1006,9 @@ export class AiPanel {
 
   toggleSettings(forceState = null) {
     const nextHidden = forceState === null ? !this.settingsDrawerEl.hidden : !forceState;
+    if (!nextHidden && this.historyOpen) {
+      this.toggleHistory(false);
+    }
     this.settingsDrawerEl.hidden = nextHidden;
     this.settingsBtn?.classList.toggle("active", !nextHidden);
     if (!nextHidden) {
@@ -969,11 +1060,279 @@ export class AiPanel {
   }
 
   clearChat() {
+    this.startNewChat();
+  }
+
+  refreshHistoryView() {
+    if (this.historyOpen) {
+      this.renderHistoryDrawer();
+    }
+  }
+
+  async toggleHistory(forceState = null) {
+    if (!this.historyDrawerEl) return;
+    const nextOpen = forceState === null ? !this.historyOpen : Boolean(forceState);
+    this.historyOpen = nextOpen;
+    this.historyDrawerEl.hidden = !nextOpen;
+    this.historyBtn?.classList.toggle("active", nextOpen);
+
+    if (nextOpen) {
+      if (!this.settingsDrawerEl.hidden) {
+        this.settingsDrawerEl.hidden = true;
+        this.settingsBtn?.classList.remove("active");
+      }
+      this.closeModelPopover();
+      this.hideTurnPreview();
+      try {
+        const list = await this.invoke("ai_list_chats");
+        if (Array.isArray(list)) {
+          this.chats = list;
+          this.chatsLoaded = true;
+        }
+      } catch {
+        // Keep cached chat list on error
+      }
+      this.renderHistoryDrawer();
+      this.historySearchEl?.focus();
+    }
+  }
+
+  startNewChat() {
     if (this.isStreaming) this.cancel();
+    this.activeChatId = null;
+    this.activeChatTitle = "";
+    this.activeChatPinned = false;
+    this.activeChatCreatedAt = 0;
+    this.activeChatVaultPath = "";
+    this.activeChatVaultName = "";
     this.messages = [];
     this.pinnedAttachments = [];
+    this.hideTurnPreview();
+    if (this.historyOpen) this.toggleHistory(false);
     this.renderChips();
     this.renderMessages();
+    if (this.openState) this.inputEl?.focus();
+  }
+
+  async openChat(chatId, closeDrawer = true) {
+    if (!chatId) return;
+    if (this.isStreaming) await this.cancel();
+    try {
+      const session = await this.invoke("ai_load_chat", { chatId });
+      this.activeChatId = session.id;
+      this.activeChatTitle = session.title || "Conversation";
+      this.activeChatPinned = Boolean(session.pinned);
+      this.activeChatCreatedAt = session.created_at || Math.floor(Date.now() / 1000);
+      this.activeChatVaultPath = session.vault_path || "";
+      this.activeChatVaultName = session.vault_name || "";
+      this.messages = (session.messages || []).map((m) => {
+        const proposalStates = {};
+        if (m.proposal_states && typeof m.proposal_states === "object") {
+          for (const [k, v] of Object.entries(m.proposal_states)) {
+            proposalStates[k] = v;
+          }
+        }
+        return {
+          id: m.id,
+          role: m.role,
+          content: m.content || "",
+          createdAt: m.created_at || 0,
+          ...(m.error ? { error: m.error } : {}),
+          proposalStates,
+        };
+      });
+      this.pinnedAttachments = [];
+      this.hideTurnPreview();
+      if (closeDrawer && this.historyOpen) this.toggleHistory(false);
+      this.renderChips();
+      this.renderMessages(true);
+      if (this.historyOpen) this.renderHistoryDrawer();
+    } catch (err) {
+      this.onToast?.(`Failed to load conversation: ${err}`, true);
+    }
+  }
+
+  async persistActiveChat() {
+    if (!this.messages.length) return;
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (!this.activeChatId) {
+      const rand = Math.random().toString(36).slice(2, 7);
+      this.activeChatId = `chat-${Date.now().toString(36)}-${rand}`;
+      this.activeChatCreatedAt = nowSec;
+      const firstUser = this.messages.find((m) => m.role === "user");
+      this.activeChatTitle = deriveChatTitle(firstUser?.content || "");
+      const ctx = this.getCurrentContext?.() || {};
+      this.activeChatVaultPath = ctx.vaultPath || "";
+      this.activeChatVaultName = ctx.vaultName || "";
+    }
+
+    const session = {
+      id: this.activeChatId,
+      title: this.activeChatTitle || "New Conversation",
+      vault_path: this.activeChatVaultPath || "",
+      vault_name: this.activeChatVaultName || "",
+      pinned: Boolean(this.activeChatPinned),
+      created_at: this.activeChatCreatedAt || nowSec,
+      updated_at: nowSec,
+      messages: this.messages.map((m) => {
+        const proposal_states = {};
+        for (const [k, v] of Object.entries(m.proposalStates || {})) {
+          proposal_states[String(k)] = String(v);
+        }
+        return {
+          id: m.id,
+          role: m.role,
+          content: m.content || "",
+          created_at: m.createdAt ? Math.floor(m.createdAt / 1000) : nowSec,
+          error: m.error || null,
+          proposal_states,
+        };
+      }),
+    };
+
+    try {
+      const updated = await this.invoke("ai_save_chat", { session });
+      if (Array.isArray(updated)) {
+        this.chats = updated;
+        this.chatsLoaded = true;
+        if (this.historyOpen) this.renderHistoryDrawer();
+      }
+    } catch (err) {
+      console.error("Failed to persist chat:", err);
+    }
+  }
+
+  renderHistoryDrawer() {
+    if (!this.historyListEl) return;
+    const q = this.historyFilter;
+    const ctx = this.getCurrentContext?.() || {};
+    const activeVaultPath = ctx.vaultPath || "";
+    const filtered = q
+      ? this.chats.filter(
+          (c) =>
+            (c.title || "").toLowerCase().includes(q) ||
+            (c.vault_name || "").toLowerCase().includes(q)
+        )
+      : this.chats;
+
+    if (!filtered.length) {
+      this.historyListEl.innerHTML = `<div class="popover-section-label">${
+        q ? "No matching conversations" : "No saved conversations yet"
+      }</div>`;
+      return;
+    }
+
+    const pinned = filtered.filter((c) => c.pinned);
+    const inVault = filtered.filter(
+      (c) => !c.pinned && activeVaultPath && c.vault_path === activeVaultPath
+    );
+    const others = filtered.filter(
+      (c) => !c.pinned && (!activeVaultPath || c.vault_path !== activeVaultPath)
+    );
+
+    const renderGroup = (heading, items) => {
+      if (!items.length) return "";
+      const rows = items
+        .map((c) => {
+          const isActive = c.id === this.activeChatId;
+          const age = formatRelativeAge(c.updated_at);
+          const subTitle =
+            c.vault_name && c.vault_path !== activeVaultPath ? ` (${c.vault_name})` : "";
+          return `
+            <div class="ai-chat-row${isActive ? " active" : ""}" data-chat-id="${escapeHtml(c.id)}" title="${escapeHtml(c.title + subTitle)}">
+              <span class="ai-chat-title">${escapeHtml(c.title)}</span>
+              <span class="ai-chat-age">${escapeHtml(age)}</span>
+              <div class="ai-chat-actions">
+                <button class="ai-chat-act-btn${c.pinned ? " pinned" : ""}" data-chat-pin="${escapeHtml(c.id)}" type="button" title="${c.pinned ? "Unpin" : "Pin"}">📌</button>
+                <button class="ai-chat-act-btn" data-chat-rename="${escapeHtml(c.id)}" type="button" title="Rename">✎</button>
+                <button class="ai-chat-act-btn danger" data-chat-del="${escapeHtml(c.id)}" type="button" title="Delete">×</button>
+              </div>
+            </div>
+          `;
+        })
+        .join("");
+      return `<div class="ai-history-section">${escapeHtml(heading)}</div>${rows}`;
+    };
+
+    const html = [
+      renderGroup("Pinned", pinned),
+      renderGroup(ctx.vaultName || "Current Folder", inVault),
+      renderGroup("Conversations", others),
+    ].join("");
+
+    this.historyListEl.innerHTML = html;
+
+    this.historyListEl.querySelectorAll(".ai-chat-row").forEach((row) => {
+      row.addEventListener("click", (e) => {
+        if (e.target.closest(".ai-chat-actions")) return;
+        this.openChat(row.dataset.chatId);
+      });
+    });
+
+    this.historyListEl.querySelectorAll("[data-chat-pin]").forEach((btn) => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const chatId = btn.dataset.chatPin;
+        const chat = this.chats.find((c) => c.id === chatId);
+        if (!chat) return;
+        const nextPinned = !chat.pinned;
+        try {
+          const updated = await this.invoke("ai_update_chat_meta", {
+            chatId,
+            title: null,
+            pinned: nextPinned,
+          });
+          if (Array.isArray(updated)) this.chats = updated;
+          if (chatId === this.activeChatId) this.activeChatPinned = nextPinned;
+          this.renderHistoryDrawer();
+        } catch (err) {
+          this.onToast?.(`Failed to update chat: ${err}`, true);
+        }
+      });
+    });
+
+    this.historyListEl.querySelectorAll("[data-chat-rename]").forEach((btn) => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const chatId = btn.dataset.chatRename;
+        const chat = this.chats.find((c) => c.id === chatId);
+        if (!chat || !this.onPromptRenameChat) return;
+        const nextTitle = await this.onPromptRenameChat(chat);
+        if (!nextTitle || !nextTitle.trim()) return;
+        const cleanTitle = nextTitle.trim();
+        try {
+          const updated = await this.invoke("ai_update_chat_meta", {
+            chatId,
+            title: cleanTitle,
+            pinned: null,
+          });
+          if (Array.isArray(updated)) this.chats = updated;
+          if (chatId === this.activeChatId) this.activeChatTitle = cleanTitle;
+          this.renderHistoryDrawer();
+        } catch (err) {
+          this.onToast?.(`Failed to rename chat: ${err}`, true);
+        }
+      });
+    });
+
+    this.historyListEl.querySelectorAll("[data-chat-del]").forEach((btn) => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const chatId = btn.dataset.chatDel;
+        try {
+          const updated = await this.invoke("ai_delete_chat", { chatId });
+          if (Array.isArray(updated)) this.chats = updated;
+          if (chatId === this.activeChatId) {
+            this.startNewChat();
+            this.toggleHistory(true);
+          } else {
+            this.renderHistoryDrawer();
+          }
+        } catch (err) {
+          this.onToast?.(`Failed to delete chat: ${err}`, true);
+        }
+      });
+    });
   }
 
   attachBlock(block) {
@@ -1181,7 +1540,12 @@ export class AiPanel {
       }
     }
 
-    const systemPrompt = `You are Skillweaver AI, a concise Notion + Obsidian workspace assistant embedded in a markdown block editor.
+    const systemPrompt = `You are Skillweaver AI, the built-in assistant for Skillweaver™ — created by the Blue Frog Foundation as a lightweight, local-first Notion + Obsidian alternative over plain Markdown folders.
+
+Identity & Attribution:
+- Creator / Developer / Trademark: Blue Frog Foundation.
+- Product: Skillweaver™ — a lightweight Notion + Obsidian alternative created by the Blue Frog Foundation.
+- Whenever the user asks who created you, who developed Skillweaver, or asks for developer, credit, or trademark details, answer clearly that you are Skillweaver AI, created by the Blue Frog Foundation as a lightweight Notion + Obsidian alternative (only mention the configured third-party LLM model/provider if the user explicitly asks which API model is connected).
 
 Capabilities & Rules:
 - You can read the user's current page blocks (each tagged with [block_id]), highlighted snippets, [[wikilinks]] / @@mentions, and relevant notes across their opened folder.
@@ -1225,21 +1589,29 @@ ${sections.join("\n\n================\n\n")}`;
     this.inputEl.value = "";
     this.inputEl.style.height = "38px";
 
-    this.messages.push({ id: `u-${Date.now()}`, role: "user", content: prompt });
-    const reqId = `ai-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-    this.messages.push({ id: reqId, role: "assistant", content: "", proposalStates: {} });
+    const nowMs = Date.now();
+    this.messages.push({ id: `u-${nowMs}`, role: "user", content: prompt, createdAt: nowMs });
+    const reqId = `ai-${nowMs.toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    this.messages.push({
+      id: reqId,
+      role: "assistant",
+      content: "",
+      createdAt: nowMs,
+      proposalStates: {},
+    });
 
     this.activeRequestId = reqId;
     this.isStreaming = true;
     this.sendBtn.hidden = true;
     this.stopBtn.hidden = false;
     this.renderMessages(true);
+    this.persistActiveChat();
 
     let systemPrompt;
     try {
       systemPrompt = await this.buildContextBundle(prompt);
     } catch (err) {
-      systemPrompt = "You are Skillweaver AI.";
+      systemPrompt = "You are Skillweaver AI, created by the Blue Frog Foundation as a lightweight Notion + Obsidian alternative. If asked who created you or for developer details, state that you were created by the Blue Frog Foundation as a lightweight Notion + Obsidian alternative.";
       console.error("Context bundle failed:", err);
     }
 
@@ -1341,6 +1713,8 @@ ${sections.join("\n\n================\n\n")}`;
 
   renderMessages(scrollToBottom = false) {
     if (!this.messages.length) {
+      this._turns = [];
+      this.renderTurnRail([]);
       this.messagesEl.innerHTML = `
         <div class="ai-empty">
           <p><strong>Ask anything</strong> about this page or your whole markdown folder.</p>
@@ -1350,10 +1724,34 @@ ${sections.join("\n\n================\n\n")}`;
       return;
     }
 
+    const turns = [];
+    const msgToTurn = new Map();
+    for (let i = 0; i < this.messages.length; i++) {
+      const m = this.messages[i];
+      if (m.role === "user") {
+        const nextMsg =
+          i + 1 < this.messages.length && this.messages[i + 1].role === "assistant"
+            ? this.messages[i + 1]
+            : null;
+        const turnIdx = turns.length;
+        turns.push({
+          turnIdx,
+          userMsg: m,
+          assistantMsg: nextMsg,
+          createdAt: m.createdAt || nextMsg?.createdAt || 0,
+        });
+        msgToTurn.set(m.id, turnIdx);
+        if (nextMsg) msgToTurn.set(nextMsg.id, turnIdx);
+      }
+    }
+    this._turns = turns;
+
     this.messagesEl.innerHTML = this.messages
       .map((msg) => {
+        const tIdx = msgToTurn.get(msg.id);
+        const turnAttr = tIdx !== undefined ? ` data-turn-idx="${tIdx}"` : "";
         if (msg.role === "user") {
-          return `<div class="ai-msg ai-msg-user"><div class="ai-bubble">${escapeHtml(msg.content).replace(/\n/g, "<br>")}</div></div>`;
+          return `<div class="ai-msg ai-msg-user"${turnAttr}><div class="ai-bubble">${escapeHtml(msg.content).replace(/\n/g, "<br>")}</div></div>`;
         }
         let bodyHtml;
         if (msg.error) {
@@ -1382,12 +1780,14 @@ ${sections.join("\n\n================\n\n")}`;
           : "";
 
         return `
-          <div class="ai-msg ai-msg-assistant">
+          <div class="ai-msg ai-msg-assistant"${turnAttr}>
             <div class="ai-bubble">${bodyHtml}${actionsHtml}</div>
           </div>
         `;
       })
       .join("");
+
+    this.renderTurnRail(turns);
 
     // Bind interactive buttons inside messages
     this.messagesEl.querySelectorAll(".ai-ref-link").forEach((btn) => {
@@ -1460,6 +1860,128 @@ ${sections.join("\n\n================\n\n")}`;
     if (scrollToBottom) {
       this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
     }
+    this.updateActiveTurnDot();
+  }
+
+  renderTurnRail(turns) {
+    if (!this.turnRailEl) return;
+    if (!turns || turns.length < 2) {
+      this.turnRailEl.hidden = true;
+      this.turnRailEl.innerHTML = "";
+      this.hideTurnPreview();
+      return;
+    }
+
+    this.turnRailEl.hidden = false;
+    this.turnRailEl.innerHTML = turns
+      .map(
+        (t) =>
+          `<button class="ai-turn-dot${t.turnIdx === this.activeTurnIdx ? " active" : ""}" data-turn="${t.turnIdx}" type="button" aria-label="Turn ${t.turnIdx + 1}"></button>`
+      )
+      .join("");
+
+    this.turnRailEl.querySelectorAll(".ai-turn-dot").forEach((dot) => {
+      const idx = Number(dot.dataset.turn);
+      dot.addEventListener("mouseenter", () => {
+        clearTimeout(this._turnPreviewTimer);
+        this.showTurnPreview(idx, dot);
+      });
+      dot.addEventListener("click", () => {
+        this.hideTurnPreview();
+        this.jumpToTurn(idx);
+      });
+    });
+  }
+
+  scheduleActiveTurnUpdate() {
+    if (this._scrollRaf) return;
+    this._scrollRaf = requestAnimationFrame(() => {
+      this._scrollRaf = null;
+      this.updateActiveTurnDot();
+    });
+  }
+
+  updateActiveTurnDot() {
+    if (!this.turnRailEl || this.turnRailEl.hidden || !this._turns.length) return;
+    const containerTop = this.messagesEl.getBoundingClientRect().top;
+    const userNodes = this.messagesEl.querySelectorAll(".ai-msg-user[data-turn-idx]");
+    let bestIdx = 0;
+    let bestDelta = Infinity;
+
+    userNodes.forEach((el) => {
+      const tIdx = Number(el.dataset.turnIdx);
+      const top = el.getBoundingClientRect().top - containerTop;
+      const abs = top <= 40 ? Math.abs(top) : Math.abs(top) + 1000;
+      if (abs < bestDelta) {
+        bestDelta = abs;
+        bestIdx = tIdx;
+      }
+    });
+
+    this.activeTurnIdx = bestIdx;
+    this.turnRailEl.querySelectorAll(".ai-turn-dot").forEach((dot) => {
+      dot.classList.toggle("active", Number(dot.dataset.turn) === bestIdx);
+    });
+  }
+
+  showTurnPreview(turnIdx, dotEl) {
+    if (!this.turnPreviewEl) return;
+    const turn = this._turns[turnIdx];
+    if (!turn) return;
+
+    const promptText = (turn.userMsg?.content || "").replace(/\s+/g, " ").trim();
+    let replyText = "";
+    if (turn.assistantMsg?.error) {
+      replyText = turn.assistantMsg.error;
+    } else if (turn.assistantMsg?.content) {
+      replyText = turn.assistantMsg.content
+        .replace(/```skillweaver-edits[\s\S]*?```/g, "[Proposed edits]")
+        .replace(/\s+/g, " ")
+        .trim();
+    } else {
+      replyText = "Waiting for reply...";
+    }
+
+    const timeStr = formatClockTime(turn.createdAt);
+    this.turnPreviewEl.innerHTML = `
+      <div class="ai-turn-preview-prompt">${escapeHtml(promptText)}</div>
+      <div class="ai-turn-preview-reply">${escapeHtml(replyText)}</div>
+      <div class="ai-turn-preview-meta">
+        <span>${turnIdx + 1} of ${this._turns.length}</span>
+        <span>${escapeHtml(timeStr)}</span>
+      </div>
+    `;
+    this.turnPreviewEl.hidden = false;
+
+    const dotRect = dotEl.getBoundingClientRect();
+    const prevRect = this.turnPreviewEl.getBoundingClientRect();
+    const left = Math.max(12, dotRect.left - prevRect.width - 10);
+    const top = Math.max(
+      12,
+      Math.min(window.innerHeight - prevRect.height - 12, dotRect.top - prevRect.height / 2 + 6)
+    );
+    this.turnPreviewEl.style.left = `${left}px`;
+    this.turnPreviewEl.style.top = `${top}px`;
+  }
+
+  hideTurnPreview() {
+    if (this.turnPreviewEl) {
+      this.turnPreviewEl.hidden = true;
+    }
+  }
+
+  jumpToTurn(turnIdx) {
+    const target = this.messagesEl.querySelector(`.ai-msg-user[data-turn-idx="${turnIdx}"]`);
+    if (!target) return;
+    target.scrollIntoView({ behavior: "smooth", block: "start" });
+    this.activeTurnIdx = turnIdx;
+    this.turnRailEl?.querySelectorAll(".ai-turn-dot").forEach((dot) => {
+      dot.classList.toggle("active", Number(dot.dataset.turn) === turnIdx);
+    });
+    target.classList.remove("ai-turn-flash");
+    void target.offsetWidth;
+    target.classList.add("ai-turn-flash");
+    setTimeout(() => target.classList.remove("ai-turn-flash"), 1150);
   }
 
   handleProposalAction(msgId, propIdx, accepted) {
@@ -1469,6 +1991,7 @@ ${sections.join("\n\n================\n\n")}`;
     if (!accepted) {
       msg.proposalStates[propIdx] = "rejected";
       this.renderMessages();
+      this.persistActiveChat();
       return;
     }
 
@@ -1483,6 +2006,7 @@ ${sections.join("\n\n================\n\n")}`;
           if (ok) {
             msg.proposalStates[propIdx] = "accepted";
             this.renderMessages();
+            this.persistActiveChat();
           }
         }
         return;

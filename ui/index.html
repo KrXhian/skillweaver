@@ -126,6 +126,7 @@
               <div class="cheat-row"><kbd>```</kbd><span>Fenced Code Block</span></div>
               <div class="cheat-row"><kbd>@@</kbd><span>Link any <code>.md</code> page (Obsidian <code>[[wikilinks]]</code>)</span></div>
             </div>
+            <div class="welcome-credit">Skillweaver&trade; &middot; Created by the Blue Frog Foundation</div>
           </div>
         </section>
 
@@ -224,6 +225,12 @@
     <aside id="ai-panel" class="ai-panel" aria-label="AI Assistant" hidden>
       <div class="ai-header">
         <div class="ai-header-left">
+          <button id="ai-btn-history" class="icon-btn ai-history-btn" title="Chat History" aria-label="Chat History">
+            <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35">
+              <circle cx="8" cy="8" r="5.5"/>
+              <path d="M8 5v3.2l2.1 1.4"/>
+            </svg>
+          </button>
           <span class="ai-title">AI Assistant</span>
           <button id="ai-model-badge" class="ai-model-badge" type="button" title="Switch AI model"></button>
         </div>
@@ -231,9 +238,9 @@
           <button id="ai-btn-settings" class="top-text-btn ai-settings-btn" title="API Key, Provider &amp; Model Settings" aria-label="AI Settings">
             Settings
           </button>
-          <button id="ai-btn-clear" class="icon-btn" title="New Chat" aria-label="Clear Chat">
-            <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
-              <path d="M3 4h10M5.5 4V2.5h5V4M4.5 4l.8 9.5h5.4L11.5 4"/>
+          <button id="ai-btn-clear" class="icon-btn" title="New Conversation" aria-label="New Conversation">
+            <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M8 3.2v9.6M3.2 8h9.6"/>
             </svg>
           </button>
           <button id="ai-btn-close" class="icon-btn" title="Close AI Panel (Ctrl+Shift+A)" aria-label="Close AI">
@@ -245,6 +252,14 @@
       </div>
 
       <div id="ai-model-popover" class="popover ai-model-popover" hidden role="listbox" aria-label="Switch AI model"></div>
+
+      <div id="ai-history-drawer" class="ai-history-drawer" hidden aria-label="Chat History">
+        <div class="ai-history-top">
+          <button id="ai-btn-new-chat" class="ai-new-chat-btn" type="button">+ New Conversation</button>
+          <input id="ai-history-search" class="ai-history-search" type="search" placeholder="Search conversations..." autocomplete="off" />
+        </div>
+        <div id="ai-history-list" class="ai-history-list"></div>
+      </div>
 
       <div id="ai-settings-drawer" class="ai-settings-drawer" hidden>
         <label class="ai-field">
@@ -282,7 +297,10 @@
         </div>
       </div>
 
-      <div id="ai-messages" class="ai-messages"></div>
+      <div class="ai-messages-wrap">
+        <div id="ai-turn-rail" class="ai-turn-rail" hidden aria-label="Jump to message turn"></div>
+        <div id="ai-messages" class="ai-messages"></div>
+      </div>
 
       <div class="ai-composer">
         <div id="ai-mention-popover" class="popover ai-mention-popover" hidden role="listbox" aria-label="Mention page"></div>
@@ -320,6 +338,9 @@
 
   <!-- Drag Marquee Selection Box -->
   <div id="block-marquee" class="block-marquee" hidden></div>
+
+  <!-- AI Conversation Turn Scrubber Preview -->
+  <div id="ai-turn-preview" class="ai-turn-preview" hidden role="tooltip"></div>
 
   <!-- @@ Link Autocomplete Popover -->
   <div id="link-popover" class="popover link-popover" hidden role="listbox" aria-label="Link to page"></div>

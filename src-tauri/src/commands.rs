@@ -1,5 +1,6 @@
 use crate::ai::{
-    self, AiChatRequest, AiListModelsRequest, AiPrefs, AiState, CachedModelList, ModelsCache,
+    self, AiChatRequest, AiChatSession, AiChatSummary, AiListModelsRequest, AiPrefs, AiState,
+    CachedModelList, ModelsCache,
 };
 use crate::markdown::{self, Block};
 use crate::prefs::{self, UiPrefs};
@@ -406,6 +407,35 @@ pub async fn ai_list_models(request: AiListModelsRequest) -> Result<CachedModelL
     tauri::async_runtime::spawn_blocking(move || ai::list_models(&request))
         .await
         .map_err(|e| format!("Model list task failed: {e}"))?
+}
+
+#[tauri::command]
+pub fn ai_list_chats() -> Vec<AiChatSummary> {
+    ai::list_chats()
+}
+
+#[tauri::command]
+pub fn ai_load_chat(chat_id: String) -> Result<AiChatSession, String> {
+    ai::load_chat(&chat_id)
+}
+
+#[tauri::command]
+pub fn ai_save_chat(session: AiChatSession) -> Result<Vec<AiChatSummary>, String> {
+    ai::save_chat(&session)
+}
+
+#[tauri::command]
+pub fn ai_update_chat_meta(
+    chat_id: String,
+    title: Option<String>,
+    pinned: Option<bool>,
+) -> Result<Vec<AiChatSummary>, String> {
+    ai::update_chat_meta(&chat_id, title, pinned)
+}
+
+#[tauri::command]
+pub fn ai_delete_chat(chat_id: String) -> Result<Vec<AiChatSummary>, String> {
+    ai::delete_chat(&chat_id)
 }
 
 #[tauri::command]

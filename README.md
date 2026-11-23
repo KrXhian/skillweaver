@@ -2,6 +2,8 @@
 
 A lightweight desktop markdown editor combining Notion-style blocks with Obsidian-style folder management and page linking.
 
+*Skillweaver™ — Created by the Blue Frog Foundation.*
+
 ## Features
 
 - **Folder & `.md` Management**: Open any folder to browse a live sidebar tree of folders and `.md` files. Create, rename (automatically updating incoming `[[wikilinks]]`), and delete notes or folders. `hero.md` at the root opens automatically when opening a folder, and your last folder/preferences are remembered in `%USERPROFILE%\.skillweaver\ui.prefs`.

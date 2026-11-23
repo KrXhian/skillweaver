@@ -3,6 +3,7 @@ name = "skillweaver"
 version = "0.1.0"
 edition = "2021"
 description = "Lightweight Notion + Obsidian markdown folder editor"
+authors = ["Blue Frog Foundation"]
 
 [lib]
 name = "skillweaver_lib"
