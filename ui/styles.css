@@ -1696,6 +1696,53 @@ html[data-theme="light"] .ansi-gray { color: #6b7280; }
   color: var(--accent);
 }
 
+.ai-model-badge.deprecated {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.ai-model-expand-btn {
+  width: 100%;
+  margin-top: 4px;
+  padding: 6px 9px;
+  border: none;
+  border-top: 1px solid var(--border-subtle);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  text-align: left;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+
+.ai-model-expand-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.ai-model-status-note {
+  padding: 3px 4px 1px;
+  border-top: 1px solid var(--border-subtle);
+  font-size: 10.5px;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.ai-model-status-note.warn {
+  color: var(--danger);
+}
+
+.ai-model-tier {
+  font-size: 10.5px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: var(--bg-badge);
+  color: var(--text-secondary);
+}
+
 .ai-model-row {
   display: flex;
   align-items: center;

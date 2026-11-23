@@ -1,56 +1,56 @@
 import { displayNameForLink, escapeHtml } from "./inline.js";
 import { filterPages } from "./links.js";
 
+const MODEL_CACHE_TTL_SEC = 86400;
+
 const PROVIDER_PRESETS = {
   openai: {
     label: "OpenAI",
     baseUrl: "https://api.openai.com/v1/chat/completions",
-    defaultModel: "gpt-4o-mini",
-    models: ["gpt-4o-mini", "gpt-4o", "o3-mini"],
     needsKey: true,
   },
   gemini: {
     label: "Google Gemini",
     baseUrl: "https://generativelanguage.googleapis.com/v1beta",
-    defaultModel: "gemini-3.8-flash",
-    models: [
-      "gemini-3.8-flash",
-      "gemini-3.5-flash",
-      "gemini-3.5-flash-lite",
-      "gemini-4-hydrogen",
-      "gemini-4-neon",
-    ],
     needsKey: true,
   },
   anthropic: {
     label: "Anthropic (Claude)",
     baseUrl: "https://api.anthropic.com/v1/messages",
-    defaultModel: "claude-3-5-sonnet-latest",
-    models: ["claude-3-5-sonnet-latest", "claude-3-7-sonnet-latest", "claude-3-5-haiku-latest"],
     needsKey: true,
   },
   openrouter: {
     label: "OpenRouter",
     baseUrl: "https://openrouter.ai/api/v1/chat/completions",
-    defaultModel: "openai/gpt-4o-mini",
-    models: ["openai/gpt-4o-mini", "google/gemini-3.8-flash", "anthropic/claude-3.5-sonnet"],
     needsKey: true,
   },
   ollama: {
     label: "Ollama (Local)",
     baseUrl: "http://localhost:11434/v1/chat/completions",
-    defaultModel: "llama3.2",
-    models: ["llama3.2", "qwen2.5-coder", "mistral"],
     needsKey: false,
   },
   custom: {
     label: "Custom (OpenAI-compatible)",
     baseUrl: "http://localhost:1234/v1/chat/completions",
-    defaultModel: "local-model",
-    models: ["local-model"],
     needsKey: false,
   },
 };
+
+function canonicalCacheKey(provider, baseUrl) {
+  const p = String(provider || "openai").trim().toLowerCase();
+  const preset = PROVIDER_PRESETS[p] || PROVIDER_PRESETS.openai;
+  const clean = String(baseUrl || "").trim().replace(/\/+$/, "") || preset.baseUrl;
+  return `${p}::${clean}`;
+}
+
+function formatCacheAge(fetchedAtUnix) {
+  if (!fetchedAtUnix) return "Not synced yet";
+  const diff = Math.max(0, Math.floor(Date.now() / 1000) - fetchedAtUnix);
+  if (diff < 60) return "Synced just now";
+  if (diff < 3600) return `Synced ${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `Synced ${Math.floor(diff / 3600)}h ago`;
+  return `Synced ${Math.floor(diff / 86400)}d ago`;
+}
 
 function tauriListen(eventName, handler) {
   const listenFn = window.__TAURI__?.event?.listen;
@@ -181,7 +181,7 @@ export class AiPanel {
       provider: "openai",
       api_key: "",
       base_url: PROVIDER_PRESETS.openai.baseUrl,
-      model: PROVIDER_PRESETS.openai.defaultModel,
+      model: "",
     };
     this.prefsLoaded = false;
 
@@ -192,10 +192,11 @@ export class AiPanel {
     this.messages = []; // { id, role, content, error?, proposalStates? }
     this.activeRequestId = null;
     this.isStreaming = false;
-    this.cachedModelsByProvider = new Map();
+    this.modelsCache = {}; // cacheKey -> { fetched_at_unix, models }
     this.modelPickerOpen = false;
     this.modelPickerTarget = "header";
     this.modelFilterText = "";
+    this.showOlderModels = false;
     this.isFetchingModels = false;
     this.mentionState = {
       active: false,
@@ -228,12 +229,21 @@ export class AiPanel {
     });
 
     this.providerSelect.addEventListener("change", () => {
-      const preset = PROVIDER_PRESETS[this.providerSelect.value];
+      const nextProvider = this.providerSelect.value;
+      const preset = PROVIDER_PRESETS[nextProvider];
       if (preset) {
         this.baseUrlInput.value = preset.baseUrl;
-        this.modelInput.value = preset.defaultModel;
+        const cacheKey = canonicalCacheKey(nextProvider, preset.baseUrl);
+        const cached = this.modelsCache[cacheKey]?.models || [];
+        const best = cached.find((m) => !m.is_snapshot) || cached[0];
+        this.modelInput.value = best ? best.id : "";
+        if (!preset.needsKey || this.apiKeyInput.value.trim()) {
+          if (!this.isCacheFresh(cacheKey)) {
+            this.fetchLiveModels(nextProvider, true);
+          }
+        }
       }
-      this.updateModelHeader(this.providerSelect.value);
+      this.updateModelHeader(nextProvider);
     });
 
     saveSettingsBtn.addEventListener("click", () => this.saveSettings());
@@ -336,11 +346,32 @@ export class AiPanel {
     this.renderMessages();
   }
 
+  isCacheFresh(cacheKey) {
+    const entry = this.modelsCache[cacheKey];
+    if (!entry || !Array.isArray(entry.models) || entry.models.length === 0) return false;
+    const nowSec = Math.floor(Date.now() / 1000);
+    return nowSec - (entry.fetched_at_unix || 0) < MODEL_CACHE_TTL_SEC;
+  }
+
+  isSavedModelMissing(provider, cacheKey, modelId) {
+    if (!modelId || provider === "custom") return false;
+    const cached = this.modelsCache[cacheKey]?.models;
+    if (!Array.isArray(cached) || cached.length === 0) return false;
+    return !cached.some((m) => m.id === modelId);
+  }
+
   updateModelHeader(providerOverride = null) {
     const providerKey = providerOverride || this.prefs.provider || "openai";
-    const preset = PROVIDER_PRESETS[providerKey] || PROVIDER_PRESETS.openai;
+    const baseUrl = this.prefs.base_url?.trim() || PROVIDER_PRESETS[providerKey]?.baseUrl || "";
+    const cacheKey = canonicalCacheKey(providerKey, baseUrl);
+    const activeModel = this.prefs.model?.trim() || "";
     if (this.modelBadgeEl) {
-      this.modelBadgeEl.textContent = this.prefs.model?.trim() || preset.defaultModel || "Configure";
+      this.modelBadgeEl.textContent = activeModel || "Pick model";
+      const missing = this.isSavedModelMissing(providerKey, cacheKey, activeModel);
+      this.modelBadgeEl.classList.toggle("deprecated", missing);
+      this.modelBadgeEl.title = missing
+        ? `Model "${activeModel}" was not found in the latest live list — click to switch`
+        : "Switch AI model";
     }
   }
 
@@ -353,71 +384,118 @@ export class AiPanel {
       preset.baseUrl;
     const apiKey = (useSettings ? this.apiKeyInput.value.trim() : this.prefs.api_key?.trim()) || "";
     const currentModel =
-      (useSettings ? this.modelInput.value.trim() : this.prefs.model?.trim()) || preset.defaultModel;
-    return { provider, baseUrl, apiKey, currentModel, cacheKey: `${provider}::${baseUrl}` };
+      (useSettings ? this.modelInput.value.trim() : this.prefs.model?.trim()) || "";
+    return {
+      provider,
+      baseUrl,
+      apiKey,
+      currentModel,
+      cacheKey: canonicalCacheKey(provider, baseUrl),
+    };
   }
 
-  getAvailableModels(providerKey, cacheKey, currentModel) {
-    const preset = PROVIDER_PRESETS[providerKey] || PROVIDER_PRESETS.openai;
+  getAvailableModels(cacheKey, currentModel) {
+    const entry = this.modelsCache[cacheKey];
+    const cached = Array.isArray(entry?.models) ? entry.models : [];
+    const primary = [];
+    const older = [];
     const seen = new Set();
-    const out = [];
 
-    const cached = this.cachedModelsByProvider.get(cacheKey);
-    if (Array.isArray(cached)) {
-      for (const m of cached) {
-        if (m?.id && !seen.has(m.id)) {
-          seen.add(m.id);
-          out.push({ id: m.id, label: m.label || m.id, live: true });
-        }
-      }
-    }
-
-    for (const id of preset.models || [preset.defaultModel]) {
-      if (id && !seen.has(id)) {
-        seen.add(id);
-        out.push({ id, label: id, live: false });
+    for (const m of cached) {
+      if (!m?.id || seen.has(m.id)) continue;
+      seen.add(m.id);
+      const item = {
+        id: m.id,
+        label: m.label || m.id,
+        is_snapshot: Boolean(m.is_snapshot),
+        tier_hint: m.tier_hint || null,
+        missing: false,
+      };
+      if (item.is_snapshot) {
+        older.push(item);
+      } else {
+        primary.push(item);
       }
     }
 
     if (currentModel && !seen.has(currentModel)) {
-      seen.add(currentModel);
-      out.push({ id: currentModel, label: currentModel, live: false });
+      primary.unshift({
+        id: currentModel,
+        label: cached.length > 0 ? "Saved (not in live list)" : "Current",
+        is_snapshot: false,
+        tier_hint: cached.length > 0 ? "Stale" : null,
+        missing: cached.length > 0,
+      });
     }
 
-    return out;
+    return {
+      primary,
+      older,
+      all: [...primary, ...older],
+      fetchedAt: entry?.fetched_at_unix || 0,
+      hasLiveList: cached.length > 0,
+    };
   }
 
   async fetchLiveModels(providerOverride = null, silent = false) {
-    const ctx = this.getActiveModelProviderContext(this.modelPickerTarget);
-    const provider = providerOverride || ctx.provider;
+    const useSettings = Boolean(providerOverride) || !this.settingsDrawerEl.hidden;
+    const provider =
+      providerOverride ||
+      (useSettings ? this.providerSelect.value : this.prefs.provider || "openai");
     const preset = PROVIDER_PRESETS[provider] || PROVIDER_PRESETS.openai;
-    const baseUrl = ctx.baseUrl || preset.baseUrl;
-    const cacheKey = `${provider}::${baseUrl}`;
+    const baseUrl =
+      (useSettings ? this.baseUrlInput.value.trim() : this.prefs.base_url?.trim()) ||
+      preset.baseUrl;
+    const apiKey = (useSettings ? this.apiKeyInput.value.trim() : this.prefs.api_key?.trim()) || "";
+    const cacheKey = canonicalCacheKey(provider, baseUrl);
 
-    if (preset.needsKey && !ctx.apiKey) {
+    if (preset.needsKey && !apiKey) {
       if (!silent) this.onToast?.("Enter your API key first to fetch live models", true);
-      return;
+      return null;
     }
 
     this.isFetchingModels = true;
     if (this.modelPickerOpen) this.renderModelPopover();
 
     try {
-      const list = await this.invoke("ai_list_models", {
+      const entry = await this.invoke("ai_list_models", {
         request: {
           provider,
-          api_key: ctx.apiKey,
+          api_key: apiKey,
           base_url: baseUrl,
         },
       });
-      this.cachedModelsByProvider.set(cacheKey, Array.isArray(list) ? list : []);
-      if (!silent) {
-        this.onToast?.(`Loaded ${(list || []).length} models`);
+      const normalized = {
+        fetched_at_unix: entry?.fetched_at_unix || Math.floor(Date.now() / 1000),
+        models: Array.isArray(entry?.models) ? entry.models : [],
+      };
+      this.modelsCache[cacheKey] = normalized;
+
+      const best = normalized.models.find((m) => !m.is_snapshot) || normalized.models[0];
+      if (best) {
+        if (!this.settingsDrawerEl.hidden && this.providerSelect.value === provider && !this.modelInput.value.trim()) {
+          this.modelInput.value = best.id;
+        }
+        if (this.prefs.provider === provider && !this.prefs.model?.trim()) {
+          this.prefs = { ...this.prefs, model: best.id };
+          try {
+            await this.invoke("save_ai_prefs", { prefs: this.prefs });
+          } catch {
+            // Ignore auto-pick save error
+          }
+        }
       }
+
+      this.updateModelHeader();
+      if (!silent) {
+        this.onToast?.(`Synced ${normalized.models.length} live models`);
+      }
+      return normalized;
     } catch (err) {
       if (!silent) {
         this.onToast?.(`Failed to load models: ${err}`, true);
       }
+      return null;
     } finally {
       this.isFetchingModels = false;
       if (this.modelPickerOpen) this.renderModelPopover();
@@ -437,6 +515,7 @@ export class AiPanel {
     this.modelPickerOpen = true;
     this.modelPickerTarget = target;
     this.modelFilterText = "";
+    this.showOlderModels = false;
 
     const panelRect = this.panelEl.getBoundingClientRect();
     let topPx = 42;
@@ -453,7 +532,7 @@ export class AiPanel {
     const ctx = this.getActiveModelProviderContext(target);
     if (
       !skipAutoFetch &&
-      !this.cachedModelsByProvider.has(ctx.cacheKey) &&
+      !this.isCacheFresh(ctx.cacheKey) &&
       (ctx.apiKey || ctx.provider === "ollama")
     ) {
       this.fetchLiveModels(ctx.provider, true);
@@ -463,6 +542,7 @@ export class AiPanel {
   closeModelPopover() {
     this.modelPickerOpen = false;
     this.modelFilterText = "";
+    this.showOlderModels = false;
     if (this.modelPopoverEl) {
       this.modelPopoverEl.hidden = true;
       this.modelPopoverEl.innerHTML = "";
@@ -472,44 +552,96 @@ export class AiPanel {
   renderModelPopover() {
     if (!this.modelPopoverEl || !this.modelPickerOpen) return;
     const ctx = this.getActiveModelProviderContext(this.modelPickerTarget);
-    const allModels = this.getAvailableModels(ctx.provider, ctx.cacheKey, ctx.currentModel);
+    const { primary, older, all, fetchedAt, hasLiveList } = this.getAvailableModels(
+      ctx.cacheKey,
+      ctx.currentModel
+    );
     const q = this.modelFilterText.trim().toLowerCase();
-    const filtered = q
-      ? allModels.filter(
-          (m) => m.id.toLowerCase().includes(q) || m.label.toLowerCase().includes(q)
-        )
-      : allModels;
 
-    const listHtml = filtered.length
-      ? filtered
-          .map((m) => {
-            const isSel = m.id === ctx.currentModel;
-            const sub = m.label !== m.id ? m.label : m.live ? "Live" : "Preset";
-            return `
-              <button class="popover-item${isSel ? " selected" : ""}" data-model-id="${escapeHtml(m.id)}" type="button" role="option">
-                <span class="popover-item-main">
-                  <span class="popover-item-title">${isSel ? "✓ " : ""}${escapeHtml(m.id)}</span>
-                </span>
-                <span class="popover-item-sub">${escapeHtml(sub)}</span>
-              </button>
-            `;
-          })
-          .join("")
-      : `<div class="popover-section-label">No matching models</div>`;
+    const renderRow = (m) => {
+      const isSel = m.id === ctx.currentModel;
+      const hintParts = [];
+      if (m.label && m.label !== m.id && !m.missing) hintParts.push(m.label);
+      const subText = hintParts.join(" · ");
+      const tierBadge = m.tier_hint
+        ? `<span class="ai-model-tier">${escapeHtml(m.tier_hint)}</span>`
+        : "";
+      const subHtml =
+        subText || tierBadge
+          ? `<span class="popover-item-sub">${tierBadge}${subText ? ` ${escapeHtml(subText)}` : ""}</span>`
+          : "";
+      return `
+        <button class="popover-item${isSel ? " selected" : ""}" data-model-id="${escapeHtml(m.id)}" type="button" role="option">
+          <span class="popover-item-main">
+            <span class="popover-item-title">${isSel ? "✓ " : ""}${escapeHtml(m.id)}</span>
+          </span>
+          ${subHtml}
+        </button>
+      `;
+    };
+
+    let listHtml = "";
+    if (q) {
+      const matches = all.filter(
+        (m) => m.id.toLowerCase().includes(q) || (m.label || "").toLowerCase().includes(q)
+      );
+      listHtml = matches.length
+        ? matches.map(renderRow).join("")
+        : `<div class="popover-section-label">No matching models</div>`;
+    } else if (!all.length) {
+      listHtml = `<div class="popover-section-label">${
+        this.isFetchingModels
+          ? "Fetching live models..."
+          : ctx.apiKey || ctx.provider === "ollama"
+            ? "Click ↻ Fetch to load models"
+            : "Add your API key in Settings first"
+      }</div>`;
+    } else {
+      const visiblePrimary = primary.slice();
+      if (ctx.currentModel) {
+        const activeOlder = older.find((m) => m.id === ctx.currentModel);
+        if (activeOlder && !visiblePrimary.some((m) => m.id === activeOlder.id)) {
+          visiblePrimary.unshift(activeOlder);
+        }
+      }
+      listHtml = visiblePrimary.map(renderRow).join("");
+      if (older.length > 0) {
+        const verb = this.showOlderModels ? "▾ Hide" : "▸ Show";
+        listHtml += `<button class="ai-model-expand-btn" data-toggle-older="1" type="button">${verb} older &amp; preview models (${older.length})</button>`;
+        if (this.showOlderModels) {
+          listHtml += older.map(renderRow).join("");
+        }
+      }
+    }
+
+    const isDeprecated = this.isSavedModelMissing(ctx.provider, ctx.cacheKey, ctx.currentModel);
+    const statusText = this.isFetchingModels
+      ? "Syncing live models..."
+      : isDeprecated
+        ? `"${ctx.currentModel}" may be retired — pick another`
+        : hasLiveList
+          ? `${formatCacheAge(fetchedAt)} · ${all.length} models`
+          : "Cached list empty";
 
     const existingFilter = this.modelPopoverEl.querySelector(".ai-model-filter");
     if (existingFilter) {
       const listEl = this.modelPopoverEl.querySelector(".ai-model-popover-list");
       const refreshBtn = this.modelPopoverEl.querySelector("[data-refresh-models]");
+      const statusEl = this.modelPopoverEl.querySelector(".ai-model-status-note");
       if (listEl) listEl.innerHTML = listHtml;
       if (refreshBtn) refreshBtn.textContent = this.isFetchingModels ? "…" : "↻ Fetch";
+      if (statusEl) {
+        statusEl.textContent = statusText;
+        statusEl.classList.toggle("warn", isDeprecated);
+      }
     } else {
       this.modelPopoverEl.innerHTML = `
         <div class="ai-model-popover-header">
-          <input class="ai-model-filter" type="text" placeholder="Filter ${allModels.length} models..." value="${escapeHtml(this.modelFilterText)}" autocomplete="off" />
+          <input class="ai-model-filter" type="text" placeholder="Filter models..." value="${escapeHtml(this.modelFilterText)}" autocomplete="off" />
           <button class="top-text-btn" data-refresh-models="1" type="button" title="Fetch live models from provider">${this.isFetchingModels ? "…" : "↻ Fetch"}</button>
         </div>
         <div class="ai-model-popover-list">${listHtml}</div>
+        <div class="ai-model-status-note${isDeprecated ? " warn" : ""}">${escapeHtml(statusText)}</div>
       `;
       this.modelPopoverEl.querySelector(".ai-model-filter")?.addEventListener("input", (e) => {
         this.modelFilterText = e.target.value;
@@ -524,6 +656,12 @@ export class AiPanel {
     }
 
     this.modelPopoverEl.hidden = false;
+    this.modelPopoverEl.querySelector("[data-toggle-older]")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.showOlderModels = !this.showOlderModels;
+      this.renderModelPopover();
+      this.modelPopoverEl.querySelector(".ai-model-filter")?.focus();
+    });
     this.modelPopoverEl.querySelectorAll("[data-model-id]").forEach((btn) => {
       btn.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -625,15 +763,26 @@ export class AiPanel {
   async ensurePrefsLoaded() {
     if (this.prefsLoaded) return;
     try {
-      const loaded = await this.invoke("get_ai_prefs");
+      const [loaded, cachedModels] = await Promise.all([
+        this.invoke("get_ai_prefs"),
+        this.invoke("get_cached_models").catch(() => ({})),
+      ]);
       if (loaded) {
         this.prefs = { ...this.prefs, ...loaded };
+      }
+      if (cachedModels && typeof cachedModels === "object") {
+        this.modelsCache = cachedModels;
       }
       this.prefsLoaded = true;
       this.syncSettingsInputs();
       const preset = PROVIDER_PRESETS[this.prefs.provider] || PROVIDER_PRESETS.openai;
       if (preset.needsKey && !this.prefs.api_key?.trim()) {
         this.settingsDrawerEl.hidden = false;
+      } else {
+        const cacheKey = canonicalCacheKey(this.prefs.provider, this.prefs.base_url);
+        if (!this.isCacheFresh(cacheKey)) {
+          this.fetchLiveModels(this.prefs.provider, true);
+        }
       }
     } catch {
       this.prefsLoaded = true;
@@ -778,12 +927,32 @@ export class AiPanel {
   }
 
   async saveSettings() {
-    const nextPrefs = {
-      provider: this.providerSelect.value,
-      api_key: this.apiKeyInput.value.trim(),
-      base_url: this.baseUrlInput.value.trim(),
-      model: this.modelInput.value.trim(),
-    };
+    const provider = this.providerSelect.value;
+    const api_key = this.apiKeyInput.value.trim();
+    const base_url =
+      this.baseUrlInput.value.trim() || PROVIDER_PRESETS[provider]?.baseUrl || "";
+    let model = this.modelInput.value.trim();
+    const cacheKey = canonicalCacheKey(provider, base_url);
+
+    if (!model && (api_key || provider === "ollama")) {
+      const cached = this.modelsCache[cacheKey]?.models || [];
+      const fetched =
+        cached.length > 0 ? { models: cached } : await this.fetchLiveModels(provider, true);
+      const best =
+        fetched?.models?.find((m) => !m.is_snapshot) || fetched?.models?.[0];
+      if (best?.id) {
+        model = best.id;
+        this.modelInput.value = model;
+      }
+    }
+
+    if (!model) {
+      this.modelInput.focus();
+      this.onToast?.("Pick or type a model name first", true);
+      return;
+    }
+
+    const nextPrefs = { provider, api_key, base_url, model };
     try {
       await this.invoke("save_ai_prefs", { prefs: nextPrefs });
       this.prefs = nextPrefs;
@@ -791,6 +960,9 @@ export class AiPanel {
       this.settingsDrawerEl.hidden = true;
       this.settingsBtn?.classList.remove("active");
       this.onToast?.("AI settings saved");
+      if ((api_key || provider === "ollama") && !this.isCacheFresh(cacheKey)) {
+        this.fetchLiveModels(provider, true);
+      }
     } catch (err) {
       this.onToast?.(`Failed to save AI settings: ${err}`, true);
     }
@@ -1041,6 +1213,12 @@ ${sections.join("\n\n================\n\n")}`;
     if (preset.needsKey && !this.prefs.api_key?.trim()) {
       this.toggleSettings(true);
       this.onToast?.("Enter your API key first", true);
+      return;
+    }
+    if (!this.prefs.model?.trim()) {
+      this.toggleSettings(true);
+      this.openModelPopover("settings", false);
+      this.onToast?.("Pick an AI model first", true);
       return;
     }
 
