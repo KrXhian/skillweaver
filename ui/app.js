@@ -50,6 +50,11 @@ const el = {
   toast: document.getElementById("toast"),
 };
 
+const ZOOM_MIN_PERCENT = 50;
+const ZOOM_MAX_PERCENT = 200;
+const ZOOM_STEP_PERCENT = 10;
+const ZOOM_DEFAULT_PERCENT = 100;
+
 const state = {
   prefs: {
     last_folder: null,
@@ -59,6 +64,7 @@ const state = {
     sidebar_collapsed: false,
     terminal_height: 240,
     ai_panel_width: 340,
+    zoom_percent: ZOOM_DEFAULT_PERCENT,
     collapsed_headings: {},
   },
   vault: null,
@@ -67,6 +73,7 @@ const state = {
   graphMode: false,
   isDirty: false,
   saveTimer: null,
+  zoomSaveTimer: null,
   toastTimer: null,
 };
 
@@ -126,6 +133,55 @@ function applyTheme(theme) {
   }
 }
 
+function clampZoomPercent(value) {
+  const n = Math.round(Number(value));
+  if (!Number.isFinite(n) || n <= 0) return ZOOM_DEFAULT_PERCENT;
+  return Math.min(ZOOM_MAX_PERCENT, Math.max(ZOOM_MIN_PERCENT, n));
+}
+
+function schedulePersistZoom() {
+  clearTimeout(state.zoomSaveTimer);
+  state.zoomSaveTimer = setTimeout(() => {
+    state.zoomSaveTimer = null;
+    persistPrefs();
+  }, 200);
+}
+
+async function applyZoom(percent, { persist = true, toast = true, toastLabel = null } = {}) {
+  const next = clampZoomPercent(percent);
+  state.prefs.zoom_percent = next;
+  try {
+    await invoke("set_window_zoom", { zoomPercent: next });
+    if (toast) {
+      showToast(toastLabel || `Zoom: ${next}%`);
+    }
+    if (persist) {
+      schedulePersistZoom();
+    }
+  } catch (err) {
+    if (toast) showToast(`Zoom failed: ${err}`, true);
+  }
+}
+
+function stepZoom(delta) {
+  const current = clampZoomPercent(state.prefs.zoom_percent);
+  const next = clampZoomPercent(current + delta);
+  if (next === current) {
+    const edge = next <= ZOOM_MIN_PERCENT ? "Min" : "Max";
+    showToast(`Zoom: ${next}% (${edge})`);
+    return;
+  }
+  applyZoom(next, { persist: true, toast: true });
+}
+
+function resetZoom() {
+  applyZoom(ZOOM_DEFAULT_PERCENT, {
+    persist: true,
+    toast: true,
+    toastLabel: `Zoom: ${ZOOM_DEFAULT_PERCENT}% (Reset)`,
+  });
+}
+
 const modal = new ModalDialog(
   document.getElementById("input-modal"),
   document.getElementById("input-modal-title"),
@@ -164,6 +220,7 @@ const editor = new BlockEditor(
     boldBtn: document.getElementById("btn-sel-bold"),
     inlineCodeBtn: document.getElementById("btn-sel-code"),
     highlightBtn: document.getElementById("btn-sel-highlight"),
+    colorSelBtn: document.getElementById("btn-sel-color"),
     askAiSelBtn: document.getElementById("btn-sel-ai"),
     linkPopoverEl: document.getElementById("link-popover"),
     slashPopoverEl: document.getElementById("slash-popover"),
@@ -171,6 +228,7 @@ const editor = new BlockEditor(
     blockSelectionBarEl: document.getElementById("block-selection-bar"),
     blockSelectionCountEl: document.getElementById("block-sel-count"),
     blocksAskAiBtn: document.getElementById("btn-blocks-ask-ai"),
+    blocksColorBtn: document.getElementById("btn-blocks-color"),
     blocksOutdentBtn: document.getElementById("btn-blocks-outdent"),
     blocksDupBtn: document.getElementById("btn-blocks-dup"),
     blocksDelBtn: document.getElementById("btn-blocks-del"),
@@ -294,12 +352,43 @@ const aiPanel = new AiPanel(
       state.prefs.ai_panel_width = width;
       persistPrefs();
     },
-    onApplyEdits: (ops) => {
-      if (!state.currentFile || state.rawMode) {
-        showToast("Switch to a note in block view to apply edits", true);
-        return false;
+    onApplyEdits: async (ops, sourceFile = null) => {
+      if (sourceFile && state.currentFile !== sourceFile) {
+        const targetLower = sourceFile.toLowerCase();
+        const matchedPage = (state.vault?.pages || []).find(
+          (p) => (p.rel_path || "").toLowerCase() === targetLower
+        );
+        if (!matchedPage) {
+          showToast(`Target note "${sourceFile}" no longer exists`, true);
+          return { ok: false };
+        }
+        const confirmed = await modal.confirm({
+          title: "Switch Note to Apply Edits?",
+          description: `These edits were generated for "${matchedPage.rel_path}", while "${state.currentFile || "no note"}" is currently open. Switch to "${matchedPage.rel_path}" and apply them?`,
+          confirmLabel: "Switch & Apply",
+          danger: false,
+        });
+        if (!confirmed) {
+          return { ok: false, cancelled: true };
+        }
+        await openNote(matchedPage.rel_path);
+        if (state.currentFile !== matchedPage.rel_path) {
+          return { ok: false };
+        }
+        if (state.rawMode) {
+          state.rawMode = false;
+          updateViewVisibility();
+        }
       }
-      return editor.applyAiEdits(ops);
+      if (!state.currentFile || state.rawMode || state.graphMode) {
+        showToast("Switch to a note in block view to apply edits", true);
+        return { ok: false };
+      }
+      const res = editor.applyAiEdits(ops);
+      if (!res?.ok && res?.error) {
+        showToast(res.error, true);
+      }
+      return res;
     },
     onInsertMarkdown: async (md) => {
       if (!state.currentFile || state.rawMode) {
@@ -942,6 +1031,40 @@ el.rawTextarea.addEventListener("input", () => {
   scheduleAutoSave();
 });
 
+/* Window Zoom Shortcuts (VS Code-style, capture phase so they work everywhere) */
+window.addEventListener(
+  "keydown",
+  (e) => {
+    if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+
+    const isZoomIn =
+      e.code === "Equal" ||
+      e.code === "NumpadAdd" ||
+      e.key === "+" ||
+      e.key === "=";
+    const isZoomOut =
+      e.code === "Minus" ||
+      e.code === "NumpadSubtract" ||
+      e.key === "-" ||
+      e.key === "_";
+    const isZoomReset =
+      !e.shiftKey &&
+      (e.code === "Digit0" || e.code === "Numpad0" || e.key === "0");
+
+    if (isZoomIn) {
+      e.preventDefault();
+      stepZoom(ZOOM_STEP_PERCENT);
+    } else if (isZoomOut) {
+      e.preventDefault();
+      stepZoom(-ZOOM_STEP_PERCENT);
+    } else if (isZoomReset) {
+      e.preventDefault();
+      resetZoom();
+    }
+  },
+  true
+);
+
 /* Global Keyboard Shortcuts */
 document.addEventListener("keydown", (e) => {
   if (e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && e.key.toLowerCase() === "l") {
@@ -1040,6 +1163,10 @@ document.addEventListener("keydown", (e) => {
   } else if (key === "a" && e.shiftKey) {
     e.preventDefault();
     aiPanel.toggle();
+  } else if (key === "h" && e.shiftKey && !state.rawMode && !state.graphMode && state.currentFile) {
+    if (editor.applyLastUsedColor()) {
+      e.preventDefault();
+    }
   } else if (key === "d" && !e.shiftKey && !state.rawMode) {
     if (editor.hasBlockSelection()) {
       e.preventDefault();
@@ -1078,7 +1205,7 @@ document.addEventListener("keydown", (e) => {
     if (state.currentFile && !state.rawMode) editor.expandAll();
   } else if (key === "z" && !state.rawMode && !quickSwitcher.isOpen()) {
     const activeTag = document.activeElement?.tagName;
-    if (activeTag === "INPUT") return;
+    if (activeTag === "INPUT" || activeTag === "TEXTAREA" || document.activeElement?.closest?.(".ai-panel")) return;
     if (e.shiftKey) {
       if (editor.redo()) e.preventDefault();
     } else if (editor.undo()) {
@@ -1086,12 +1213,17 @@ document.addEventListener("keydown", (e) => {
     }
   } else if (key === "y" && !e.shiftKey && !state.rawMode && !quickSwitcher.isOpen()) {
     const activeTag = document.activeElement?.tagName;
-    if (activeTag === "INPUT") return;
+    if (activeTag === "INPUT" || activeTag === "TEXTAREA" || document.activeElement?.closest?.(".ai-panel")) return;
     if (editor.redo()) e.preventDefault();
   }
 });
 
 window.addEventListener("beforeunload", () => {
+  if (state.zoomSaveTimer) {
+    clearTimeout(state.zoomSaveTimer);
+    state.zoomSaveTimer = null;
+    persistPrefs();
+  }
   flushSave();
 });
 
@@ -1103,6 +1235,8 @@ async function init() {
     if (!state.prefs.collapsed_headings) {
       state.prefs.collapsed_headings = {};
     }
+    state.prefs.zoom_percent = clampZoomPercent(state.prefs.zoom_percent);
+    applyZoom(state.prefs.zoom_percent, { persist: false, toast: false });
     applyTheme(state.prefs.theme);
     sidebar.setWidth(state.prefs.sidebar_width);
     sidebar.setCollapsed(state.prefs.sidebar_collapsed);

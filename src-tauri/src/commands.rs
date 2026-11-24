@@ -299,8 +299,22 @@ pub fn save_ui_prefs(state: State<'_, AppState>, mut prefs: UiPrefs) -> Result<(
     if prefs.last_folder.is_none() {
         prefs.last_folder = prefs::load_prefs().last_folder;
     }
+    prefs.zoom_percent = prefs::sanitize_zoom_percent(prefs.zoom_percent);
 
     prefs::save_prefs(&prefs)
+}
+
+#[tauri::command]
+pub fn set_window_zoom(
+    webview: tauri::WebviewWindow,
+    zoom_percent: u32,
+) -> Result<u32, String> {
+    let clamped = prefs::sanitize_zoom_percent(zoom_percent);
+    let factor = (clamped as f64) / 100.0;
+    webview
+        .set_zoom(factor)
+        .map_err(|e| format!("Failed to set window zoom: {e}"))?;
+    Ok(clamped)
 }
 
 #[tauri::command]

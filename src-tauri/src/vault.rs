@@ -1114,7 +1114,8 @@ fn block_ref_id(block: &Block) -> Option<&str> {
         Block::Heading { block_id, .. }
         | Block::Paragraph { block_id, .. }
         | Block::Code { block_id, .. }
-        | Block::Image { block_id, .. } => block_id.as_deref(),
+        | Block::Image { block_id, .. }
+        | Block::Table { block_id, .. } => block_id.as_deref(),
     }
 }
 
@@ -1547,6 +1548,29 @@ mod tests {
             .find(|n| !n.exists && n.label == "Missing Note")
             .unwrap();
         assert_eq!(ghost.degree, 1);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolve_block_reference_finds_table_block_id() {
+        let root = temp_vault("table_ref");
+        create_note(&root, "hero").unwrap();
+        create_note(&root, "matrix").unwrap();
+
+        write_note(
+            &root,
+            "matrix.md",
+            "# Matrix\n\n| Col A | Col B |\n| --- | --- |\n| 1 | 2 |\n^tbl123\n",
+        )
+        .unwrap();
+
+        let table_ref = resolve_block_reference(&root, Some("hero.md"), "matrix#^tbl123")
+            .unwrap()
+            .unwrap();
+        assert_eq!(table_ref.rel_path, "matrix.md");
+        assert!(table_ref.content.contains("| Col A | Col B |"));
+        assert!(table_ref.content.contains("| 1 | 2 |"));
 
         let _ = fs::remove_dir_all(&root);
     }

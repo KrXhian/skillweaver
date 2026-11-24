@@ -124,6 +124,7 @@
               <div class="cheat-row"><kbd># </kbd><span>Collapsible Header (<code>#</code>, <code>##</code>, <code>###</code>)</span></div>
               <div class="cheat-row"><kbd>Ctrl+B</kbd><span>Bold text &amp; <code>`inline code`</code></span></div>
               <div class="cheat-row"><kbd>```</kbd><span>Fenced Code Block</span></div>
+              <div class="cheat-row"><kbd>/table</kbd><span>Table block (or type <code>| A | B |</code> + Enter)</span></div>
               <div class="cheat-row"><kbd>@@</kbd><span>Link any <code>.md</code> page (Obsidian <code>[[wikilinks]]</code>)</span></div>
             </div>
             <div class="welcome-credit">Skillweaver&trade; &middot; Created by the Blue Frog Foundation</div>
@@ -306,7 +307,7 @@
         <div id="ai-mention-popover" class="popover ai-mention-popover" hidden role="listbox" aria-label="Mention page"></div>
         <div id="ai-context-chips" class="ai-context-chips"></div>
         <div class="ai-input-box">
-          <textarea id="ai-input" class="ai-input" rows="1" placeholder="Ask about this note, highlights, or folder..."></textarea>
+          <div id="ai-input" class="ai-input" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Ask AI" spellcheck="true" data-placeholder="Ask about this note, highlights, or folder..."></div>
           <div class="ai-send-row">
             <span class="ai-send-hint">Enter to send · Shift+Enter newline</span>
             <button id="ai-send-btn" class="primary-btn ai-send-btn" type="button">Send</button>
@@ -322,6 +323,9 @@
     <button id="btn-sel-bold" class="sel-btn" title="Bold (Ctrl+B)"><strong>B</strong></button>
     <button id="btn-sel-code" class="sel-btn" title="Inline Code (Ctrl+E)"><code>&lt;/&gt;</code></button>
     <button id="btn-sel-highlight" class="sel-btn" title="Highlight (==text==)"><mark class="inline-highlight">H</mark></button>
+    <button id="btn-sel-color" class="sel-btn sel-btn-color" title="Text &amp; background color (Ctrl+Shift+H)">
+      <span class="sel-color-a">A</span><span class="sel-color-caret">▾</span>
+    </button>
     <button id="btn-sel-ai" class="sel-btn sel-btn-ai" title="Ask AI (Ctrl+J)">Ask AI</button>
   </div>
 
@@ -330,6 +334,7 @@
     <span id="block-sel-count" class="block-sel-count">1 block</span>
     <span class="block-sel-sep"></span>
     <button id="btn-blocks-ask-ai" class="sel-btn sel-btn-ai" title="Ask AI about selected blocks (Ctrl+J)">Ask AI</button>
+    <button id="btn-blocks-color" class="sel-btn" title="Color selected blocks (Ctrl+Shift+H)">Color</button>
     <button id="btn-blocks-outdent" class="sel-btn" title="Outdent selected blocks (Shift+Tab)">Outdent</button>
     <button id="btn-blocks-dup" class="sel-btn" title="Duplicate selected blocks (Ctrl+D)">Duplicate</button>
     <button id="btn-blocks-del" class="sel-btn block-sel-danger" title="Delete selected blocks (Del)">Delete</button>

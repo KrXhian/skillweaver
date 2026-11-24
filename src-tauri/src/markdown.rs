@@ -8,6 +8,10 @@ pub enum Block {
         id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         block_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        color: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bg: Option<String>,
         level: u8,
         content: String,
     },
@@ -17,6 +21,10 @@ pub enum Block {
         block_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         outdent: Option<u8>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        color: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bg: Option<String>,
         content: String,
     },
     Code {
@@ -25,6 +33,10 @@ pub enum Block {
         block_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         outdent: Option<u8>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        color: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bg: Option<String>,
         language: String,
         content: String,
     },
@@ -34,8 +46,28 @@ pub enum Block {
         block_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         outdent: Option<u8>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        color: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bg: Option<String>,
         src: String,
         alt: String,
+    },
+    Table {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outdent: Option<u8>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        color: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bg: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        alignments: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        col_widths: Vec<u16>,
+        rows: Vec<Vec<String>>,
     },
 }
 
@@ -238,6 +270,337 @@ fn parse_outdent_comment(trimmed: &str) -> Option<u8> {
     }
 }
 
+fn parse_col_widths_comment(trimmed: &str) -> Option<Vec<u16>> {
+    let inner = trimmed.strip_prefix("<!--")?.strip_suffix("-->")?.trim();
+    let val = inner.strip_prefix("col-widths:")?.trim();
+    if val.is_empty() {
+        return None;
+    }
+    let mut widths = Vec::new();
+    for part in val.split(',') {
+        let w = part.trim().parse::<u16>().ok()?;
+        if !(40..=2000).contains(&w) {
+            return None;
+        }
+        widths.push(w);
+    }
+    if widths.is_empty() {
+        None
+    } else {
+        Some(widths)
+    }
+}
+
+fn is_valid_color_name(s: &str) -> bool {
+    matches!(
+        s,
+        "gray" | "brown" | "orange" | "yellow" | "green" | "blue" | "purple" | "pink" | "red"
+    )
+}
+
+fn parse_style_comment(trimmed: &str) -> Option<(Option<String>, Option<String>)> {
+    let inner = trimmed.strip_prefix("<!--")?.strip_suffix("-->")?.trim();
+    let val = inner.strip_prefix("style:")?.trim();
+    if val.is_empty() {
+        return None;
+    }
+    let mut color: Option<String> = None;
+    let mut bg: Option<String> = None;
+    for part in val.split(';') {
+        let p = part.trim();
+        if p.is_empty() {
+            continue;
+        }
+        let (k, v) = p.split_once('=')?;
+        let key = k.trim();
+        let name = v.trim();
+        if !is_valid_color_name(name) {
+            return None;
+        }
+        match key {
+            "color" => color = Some(name.to_string()),
+            "bg" => bg = Some(name.to_string()),
+            _ => return None,
+        }
+    }
+    if color.is_none() && bg.is_none() {
+        None
+    } else {
+        Some((color, bg))
+    }
+}
+
+fn format_style_comment(color: Option<&str>, bg: Option<&str>) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(c) = color.filter(|s| is_valid_color_name(s)) {
+        parts.push(format!("color={c}"));
+    }
+    if let Some(b) = bg.filter(|s| is_valid_color_name(s)) {
+        parts.push(format!("bg={b}"));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(format!("<!-- style:{} -->", parts.join(";")))
+    }
+}
+
+fn find_closing_backticks(bytes: &[u8], start: usize, tick_len: usize) -> Option<usize> {
+    let mut search = start;
+    while search < bytes.len() {
+        if bytes[search] == b'`' {
+            let c_start = search;
+            while search < bytes.len() && bytes[search] == b'`' {
+                search += 1;
+            }
+            if search - c_start == tick_len {
+                return Some(search);
+            }
+        } else {
+            search += 1;
+        }
+    }
+    None
+}
+
+fn contains_unescaped_pipe(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'`' {
+            let tick_start = i;
+            while i < bytes.len() && bytes[i] == b'`' {
+                i += 1;
+            }
+            if let Some(close_end) = find_closing_backticks(bytes, i, i - tick_start) {
+                i = close_end;
+            }
+            continue;
+        }
+        if i + 1 < bytes.len() && bytes[i] == b'[' && bytes[i + 1] == b'[' {
+            if let Some(rel_end) = s[i + 2..].find("]]") {
+                i += 2 + rel_end + 2;
+                continue;
+            }
+        }
+        if bytes[i] == b'|' {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+fn replace_br_outside_code(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'`' {
+            let tick_start = i;
+            while i < bytes.len() && bytes[i] == b'`' {
+                i += 1;
+            }
+            if let Some(close_end) = find_closing_backticks(bytes, i, i - tick_start) {
+                out.push_str(&s[tick_start..close_end]);
+                i = close_end;
+            } else {
+                out.push_str(&s[tick_start..i]);
+            }
+            continue;
+        }
+        if bytes[i] == b'<' {
+            let rest = &s[i..];
+            let rest_lower = rest.get(..6).map(|p| p.to_ascii_lowercase());
+            if rest_lower
+                .as_deref()
+                .map(|p| p.starts_with("<br/>") || p.starts_with("<br />"))
+                .unwrap_or(false)
+            {
+                let adv = if rest[..6].to_ascii_lowercase().starts_with("<br/>") {
+                    5
+                } else {
+                    6
+                };
+                out.push('\n');
+                i += adv;
+                continue;
+            }
+            if rest
+                .get(..4)
+                .map(|p| p.eq_ignore_ascii_case("<br>"))
+                .unwrap_or(false)
+            {
+                out.push('\n');
+                i += 4;
+                continue;
+            }
+        }
+        if let Some(ch) = s[i..].chars().next() {
+            out.push(ch);
+            i += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    out
+}
+
+fn unescape_table_cell(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let mut unescaped = String::with_capacity(trimmed.len());
+    let bytes = trimmed.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() && bytes[i + 1] == b'|' {
+            unescaped.push('|');
+            i += 2;
+            continue;
+        }
+        if let Some(ch) = trimmed[i..].chars().next() {
+            unescaped.push(ch);
+            i += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    replace_br_outside_code(&unescaped)
+}
+
+fn split_table_row(line: &str) -> Option<Vec<String>> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || !contains_unescaped_pipe(trimmed) {
+        return None;
+    }
+
+    let mut inner = trimmed.strip_prefix('|').unwrap_or(trimmed);
+    if inner.ends_with('|') {
+        let before = &inner[..inner.len() - 1];
+        let backslashes = before.bytes().rev().take_while(|&b| b == b'\\').count();
+        if backslashes % 2 == 0 {
+            inner = before;
+        }
+    }
+
+    let mut cells = Vec::new();
+    let bytes = inner.as_bytes();
+    let mut start = 0usize;
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'`' {
+            let tick_start = i;
+            while i < bytes.len() && bytes[i] == b'`' {
+                i += 1;
+            }
+            if let Some(close_end) = find_closing_backticks(bytes, i, i - tick_start) {
+                i = close_end;
+            }
+            continue;
+        }
+        if i + 1 < bytes.len() && bytes[i] == b'[' && bytes[i + 1] == b'[' {
+            if let Some(rel_end) = inner[i + 2..].find("]]") {
+                i += 2 + rel_end + 2;
+                continue;
+            }
+        }
+        if bytes[i] == b'|' {
+            cells.push(unescape_table_cell(&inner[start..i]));
+            start = i + 1;
+        }
+        i += 1;
+    }
+    cells.push(unescape_table_cell(&inner[start..]));
+
+    if cells.is_empty() {
+        None
+    } else {
+        Some(cells)
+    }
+}
+
+fn parse_table_delimiter_row(line: &str) -> Option<Vec<String>> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || !trimmed.contains('|') {
+        return None;
+    }
+    let mut inner = trimmed.strip_prefix('|').unwrap_or(trimmed);
+    inner = inner.strip_suffix('|').unwrap_or(inner);
+    if inner.trim().is_empty() {
+        return None;
+    }
+
+    let mut alignments = Vec::new();
+    for part in inner.split('|') {
+        let cell = part.trim();
+        if cell.is_empty() {
+            return None;
+        }
+        let left_colon = cell.starts_with(':');
+        let right_colon = cell.ends_with(':');
+        let dashes = cell
+            .strip_prefix(':')
+            .unwrap_or(cell)
+            .strip_suffix(':')
+            .unwrap_or_else(|| cell.strip_prefix(':').unwrap_or(cell));
+        if dashes.is_empty() || !dashes.bytes().all(|b| b == b'-') {
+            return None;
+        }
+        let align = match (left_colon, right_colon) {
+            (true, true) => "center",
+            (true, false) => "left",
+            (false, true) => "right",
+            (false, false) => "",
+        };
+        alignments.push(align.to_string());
+    }
+
+    if alignments.is_empty() {
+        None
+    } else {
+        Some(alignments)
+    }
+}
+
+fn escape_table_cell(cell: &str) -> String {
+    let normalized = cell.replace("\r\n", "\n").replace('\r', "\n");
+    let single_line = normalized.replace('\n', "<br>");
+    let bytes = single_line.as_bytes();
+    let mut out = String::with_capacity(single_line.len());
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if i + 1 < bytes.len() && bytes[i] == b'[' && bytes[i + 1] == b'[' {
+            if let Some(rel_end) = single_line[i + 2..].find("]]") {
+                let end = i + 2 + rel_end + 2;
+                out.push_str(&single_line[i..end]);
+                i = end;
+                continue;
+            }
+        }
+        if bytes[i] == b'|' {
+            out.push_str("\\|");
+            i += 1;
+            continue;
+        }
+        if let Some(ch) = single_line[i..].chars().next() {
+            out.push(ch);
+            i += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    out
+}
+
 /// Parses a Markdown string into Skillweaver editor blocks.
 pub fn parse_markdown(input: &str) -> Vec<Block> {
     let normalized = input.replace("\r\n", "\n").replace('\r', "\n");
@@ -245,19 +608,28 @@ pub fn parse_markdown(input: &str) -> Vec<Block> {
     let mut counter = 0usize;
     let mut para_lines: Vec<&str> = Vec::new();
     let mut pending_outdent: Option<u8> = None;
+    let mut pending_col_widths: Vec<u16> = Vec::new();
+    let mut pending_color: Option<String> = None;
+    let mut pending_bg: Option<String> = None;
 
     let flush_para = |para_lines: &mut Vec<&str>,
                       blocks: &mut Vec<Block>,
                       counter: &mut usize,
-                      pending_outdent: &mut Option<u8>| {
+                      pending_outdent: &mut Option<u8>,
+                      pending_col_widths: &mut Vec<u16>,
+                      pending_color: &mut Option<String>,
+                      pending_bg: &mut Option<String>| {
         if !para_lines.is_empty() {
             let joined = para_lines.join("\n");
             para_lines.clear();
+            pending_col_widths.clear();
             let (clean, block_id) = strip_trailing_block_id(&joined);
             blocks.push(Block::Paragraph {
                 id: next_id(counter),
                 block_id,
                 outdent: pending_outdent.take(),
+                color: pending_color.take(),
+                bg: pending_bg.take(),
                 content: clean.to_string(),
             });
         }
@@ -269,7 +641,16 @@ pub fn parse_markdown(input: &str) -> Vec<Block> {
         let line = lines[i];
 
         if let Some(fence) = parse_fence_open(line) {
-            flush_para(&mut para_lines, &mut blocks, &mut counter, &mut pending_outdent);
+            flush_para(
+                &mut para_lines,
+                &mut blocks,
+                &mut counter,
+                &mut pending_outdent,
+                &mut pending_col_widths,
+                &mut pending_color,
+                &mut pending_bg,
+            );
+            pending_col_widths.clear();
             let mut code_lines = Vec::new();
             i += 1;
             while i < lines.len() {
@@ -284,6 +665,8 @@ pub fn parse_markdown(input: &str) -> Vec<Block> {
                 id: next_id(&mut counter),
                 block_id: None,
                 outdent: pending_outdent.take(),
+                color: pending_color.take(),
+                bg: pending_bg.take(),
                 language: fence.language,
                 content: code_lines.join("\n"),
             });
@@ -294,25 +677,83 @@ pub fn parse_markdown(input: &str) -> Vec<Block> {
         let lower_trimmed = trimmed.to_ascii_lowercase();
 
         if lower_trimmed.starts_with("<details") || lower_trimmed == "</details>" {
-            flush_para(&mut para_lines, &mut blocks, &mut counter, &mut pending_outdent);
+            flush_para(
+                &mut para_lines,
+                &mut blocks,
+                &mut counter,
+                &mut pending_outdent,
+                &mut pending_col_widths,
+                &mut pending_color,
+                &mut pending_bg,
+            );
             i += 1;
             continue;
         }
 
         if let Some(outdent_val) = parse_outdent_comment(trimmed) {
-            flush_para(&mut para_lines, &mut blocks, &mut counter, &mut pending_outdent);
+            flush_para(
+                &mut para_lines,
+                &mut blocks,
+                &mut counter,
+                &mut pending_outdent,
+                &mut pending_col_widths,
+                &mut pending_color,
+                &mut pending_bg,
+            );
             pending_outdent = Some(outdent_val);
             i += 1;
             continue;
         }
 
+        if let Some((c, b)) = parse_style_comment(trimmed) {
+            flush_para(
+                &mut para_lines,
+                &mut blocks,
+                &mut counter,
+                &mut pending_outdent,
+                &mut pending_col_widths,
+                &mut pending_color,
+                &mut pending_bg,
+            );
+            pending_color = c;
+            pending_bg = b;
+            i += 1;
+            continue;
+        }
+
+        if let Some(widths) = parse_col_widths_comment(trimmed) {
+            flush_para(
+                &mut para_lines,
+                &mut blocks,
+                &mut counter,
+                &mut pending_outdent,
+                &mut pending_col_widths,
+                &mut pending_color,
+                &mut pending_bg,
+            );
+            pending_col_widths = widths;
+            i += 1;
+            continue;
+        }
+
         if let Some(summary) = parse_legacy_summary(trimmed) {
-            flush_para(&mut para_lines, &mut blocks, &mut counter, &mut pending_outdent);
+            flush_para(
+                &mut para_lines,
+                &mut blocks,
+                &mut counter,
+                &mut pending_outdent,
+                &mut pending_col_widths,
+                &mut pending_color,
+                &mut pending_bg,
+            );
             pending_outdent = None;
+            pending_col_widths.clear();
             let (clean, block_id) = strip_trailing_block_id(&summary);
             blocks.push(Block::Heading {
                 id: next_id(&mut counter),
                 block_id,
+                color: pending_color.take(),
+                bg: pending_bg.take(),
                 level: 2,
                 content: clean.to_string(),
             });
@@ -321,12 +762,23 @@ pub fn parse_markdown(input: &str) -> Vec<Block> {
         }
 
         if let Some((level, content)) = parse_atx_heading(line) {
-            flush_para(&mut para_lines, &mut blocks, &mut counter, &mut pending_outdent);
+            flush_para(
+                &mut para_lines,
+                &mut blocks,
+                &mut counter,
+                &mut pending_outdent,
+                &mut pending_col_widths,
+                &mut pending_color,
+                &mut pending_bg,
+            );
             pending_outdent = None;
+            pending_col_widths.clear();
             let (clean, block_id) = strip_trailing_block_id(&content);
             blocks.push(Block::Heading {
                 id: next_id(&mut counter),
                 block_id,
+                color: pending_color.take(),
+                bg: pending_bg.take(),
                 level,
                 content: clean.to_string(),
             });
@@ -335,11 +787,22 @@ pub fn parse_markdown(input: &str) -> Vec<Block> {
         }
 
         if let Some((src, alt)) = parse_image_line(trimmed) {
-            flush_para(&mut para_lines, &mut blocks, &mut counter, &mut pending_outdent);
+            flush_para(
+                &mut para_lines,
+                &mut blocks,
+                &mut counter,
+                &mut pending_outdent,
+                &mut pending_col_widths,
+                &mut pending_color,
+                &mut pending_bg,
+            );
+            pending_col_widths.clear();
             blocks.push(Block::Image {
                 id: next_id(&mut counter),
                 block_id: None,
                 outdent: pending_outdent.take(),
+                color: pending_color.take(),
+                bg: pending_bg.take(),
                 src,
                 alt,
             });
@@ -358,6 +821,10 @@ pub fn parse_markdown(input: &str) -> Vec<Block> {
                         *block_id = Some(bid);
                         true
                     }
+                    Some(Block::Table { block_id, .. }) if block_id.is_none() => {
+                        *block_id = Some(bid);
+                        true
+                    }
                     _ => false,
                 };
                 if attached {
@@ -367,8 +834,73 @@ pub fn parse_markdown(input: &str) -> Vec<Block> {
             }
         }
 
+        if i + 1 < lines.len() {
+            if let (Some(header_cells), Some(alignments)) = (
+                split_table_row(lines[i]),
+                parse_table_delimiter_row(lines[i + 1]),
+            ) {
+                if !header_cells.is_empty() && header_cells.len() == alignments.len() {
+                    flush_para(
+                        &mut para_lines,
+                        &mut blocks,
+                        &mut counter,
+                        &mut pending_outdent,
+                        &mut pending_col_widths,
+                        &mut pending_color,
+                        &mut pending_bg,
+                    );
+                    let col_count = header_cells.len();
+                    let mut col_widths = std::mem::take(&mut pending_col_widths);
+                    if !col_widths.is_empty() {
+                        col_widths.resize(col_count, 160);
+                    }
+                    let mut rows = vec![header_cells];
+                    i += 2;
+                    while i < lines.len() {
+                        let body_line = lines[i];
+                        let body_trimmed = body_line.trim();
+                        if body_trimmed.is_empty()
+                            || parse_fence_open(body_line).is_some()
+                            || parse_atx_heading(body_line).is_some()
+                            || parse_outdent_comment(body_trimmed).is_some()
+                            || parse_style_comment(body_trimmed).is_some()
+                            || parse_col_widths_comment(body_trimmed).is_some()
+                            || parse_standalone_block_id_line(body_trimmed).is_some()
+                        {
+                            break;
+                        }
+                        let Some(mut cells) = split_table_row(body_line) else {
+                            break;
+                        };
+                        cells.resize(col_count, String::new());
+                        rows.push(cells);
+                        i += 1;
+                    }
+                    blocks.push(Block::Table {
+                        id: next_id(&mut counter),
+                        block_id: None,
+                        outdent: pending_outdent.take(),
+                        color: pending_color.take(),
+                        bg: pending_bg.take(),
+                        alignments,
+                        col_widths,
+                        rows,
+                    });
+                    continue;
+                }
+            }
+        }
+
         if trimmed.is_empty() {
-            flush_para(&mut para_lines, &mut blocks, &mut counter, &mut pending_outdent);
+            flush_para(
+                &mut para_lines,
+                &mut blocks,
+                &mut counter,
+                &mut pending_outdent,
+                &mut pending_col_widths,
+                &mut pending_color,
+                &mut pending_bg,
+            );
             i += 1;
             continue;
         }
@@ -377,13 +909,23 @@ pub fn parse_markdown(input: &str) -> Vec<Block> {
         i += 1;
     }
 
-    flush_para(&mut para_lines, &mut blocks, &mut counter, &mut pending_outdent);
+    flush_para(
+        &mut para_lines,
+        &mut blocks,
+        &mut counter,
+        &mut pending_outdent,
+        &mut pending_col_widths,
+        &mut pending_color,
+        &mut pending_bg,
+    );
 
     if blocks.is_empty() {
         blocks.push(Block::Paragraph {
             id: next_id(&mut counter),
             block_id: None,
             outdent: None,
+            color: None,
+            bg: None,
             content: String::new(),
         });
     }
@@ -425,31 +967,44 @@ pub fn serialize_markdown(blocks: &[Block]) -> String {
         match block {
             Block::Heading {
                 block_id,
+                color,
+                bg,
                 level,
                 content,
                 ..
             } => {
                 let hashes = "#".repeat((*level).clamp(1, 6) as usize);
                 let text = content.trim_end();
-                let mut line = if text.is_empty() {
-                    hashes
-                } else {
-                    format!("{hashes} {text}")
-                };
-                if let Some(bid) = block_id.as_deref().filter(|s| !s.is_empty()) {
-                    line.push_str(&format!(" ^{bid}"));
+                let mut out = String::new();
+                if let Some(style) = format_style_comment(color.as_deref(), bg.as_deref()) {
+                    out.push_str(&style);
+                    out.push('\n');
                 }
-                parts.push(line);
+                if text.is_empty() {
+                    out.push_str(&hashes);
+                } else {
+                    out.push_str(&format!("{hashes} {text}"));
+                }
+                if let Some(bid) = block_id.as_deref().filter(|s| !s.is_empty()) {
+                    out.push_str(&format!(" ^{bid}"));
+                }
+                parts.push(out);
             }
             Block::Paragraph {
                 block_id,
                 outdent,
+                color,
+                bg,
                 content,
                 ..
             } => {
                 let mut out = String::new();
                 if let Some(d) = (*outdent).filter(|&v| v > 0) {
                     out.push_str(&format!("<!-- outdent:{d} -->\n"));
+                }
+                if let Some(style) = format_style_comment(color.as_deref(), bg.as_deref()) {
+                    out.push_str(&style);
+                    out.push('\n');
                 }
                 out.push_str(content);
                 if let Some(bid) = block_id.as_deref().filter(|s| !s.is_empty()) {
@@ -463,6 +1018,8 @@ pub fn serialize_markdown(blocks: &[Block]) -> String {
             Block::Code {
                 block_id,
                 outdent,
+                color,
+                bg,
                 language,
                 content,
                 ..
@@ -473,6 +1030,10 @@ pub fn serialize_markdown(blocks: &[Block]) -> String {
                 let mut s = String::new();
                 if let Some(d) = (*outdent).filter(|&v| v > 0) {
                     s.push_str(&format!("<!-- outdent:{d} -->\n"));
+                }
+                if let Some(style) = format_style_comment(color.as_deref(), bg.as_deref()) {
+                    s.push_str(&style);
+                    s.push('\n');
                 }
                 if content.is_empty() {
                     s.push_str(&format!("{fence}{lang}\n{fence}"));
@@ -487,6 +1048,8 @@ pub fn serialize_markdown(blocks: &[Block]) -> String {
             Block::Image {
                 block_id,
                 outdent,
+                color,
+                bg,
                 src,
                 alt,
                 ..
@@ -501,11 +1064,82 @@ pub fn serialize_markdown(blocks: &[Block]) -> String {
                 if let Some(d) = (*outdent).filter(|&v| v > 0) {
                     s.push_str(&format!("<!-- outdent:{d} -->\n"));
                 }
+                if let Some(style) = format_style_comment(color.as_deref(), bg.as_deref()) {
+                    s.push_str(&style);
+                    s.push('\n');
+                }
                 s.push_str(&format!("![{safe_alt}]({formatted_src})"));
                 if let Some(bid) = block_id.as_deref().filter(|s| !s.is_empty()) {
                     s.push_str(&format!("\n^{bid}"));
                 }
                 parts.push(s);
+            }
+            Block::Table {
+                block_id,
+                outdent,
+                color,
+                bg,
+                alignments,
+                col_widths,
+                rows,
+                ..
+            } => {
+                let col_count = rows
+                    .iter()
+                    .map(|r| r.len())
+                    .max()
+                    .unwrap_or(0)
+                    .max(alignments.len())
+                    .max(1);
+                let mut lines_out = Vec::new();
+                if let Some(d) = (*outdent).filter(|&v| v > 0) {
+                    lines_out.push(format!("<!-- outdent:{d} -->"));
+                }
+                if let Some(style) = format_style_comment(color.as_deref(), bg.as_deref()) {
+                    lines_out.push(style);
+                }
+                if !col_widths.is_empty() {
+                    let mut widths_str = Vec::with_capacity(col_count);
+                    for c in 0..col_count {
+                        let w = col_widths.get(c).copied().unwrap_or(160).clamp(40, 2000);
+                        widths_str.push(w.to_string());
+                    }
+                    lines_out.push(format!("<!-- col-widths:{} -->", widths_str.join(",")));
+                }
+
+                let format_row = |cells: &[String]| -> String {
+                    let mut padded = Vec::with_capacity(col_count);
+                    for c in 0..col_count {
+                        let raw = cells.get(c).map(String::as_str).unwrap_or("");
+                        padded.push(escape_table_cell(raw));
+                    }
+                    format!("| {} |", padded.join(" | "))
+                };
+
+                let header = rows.first().map(Vec::as_slice).unwrap_or(&[]);
+                lines_out.push(format_row(header));
+
+                let mut delims = Vec::with_capacity(col_count);
+                for c in 0..col_count {
+                    let align = alignments.get(c).map(String::as_str).unwrap_or("");
+                    let sep = match align {
+                        "left" => ":---",
+                        "center" => ":---:",
+                        "right" => "---:",
+                        _ => "---",
+                    };
+                    delims.push(sep);
+                }
+                lines_out.push(format!("| {} |", delims.join(" | ")));
+
+                for body_row in rows.iter().skip(1) {
+                    lines_out.push(format_row(body_row));
+                }
+
+                if let Some(bid) = block_id.as_deref().filter(|s| !s.is_empty()) {
+                    lines_out.push(format!("^{bid}"));
+                }
+                parts.push(lines_out.join("\n"));
             }
         }
     }
@@ -861,6 +1495,8 @@ Line two
             id: "b-1".into(),
             block_id: None,
             outdent: None,
+            color: None,
+            bg: None,
             language: "markdown".into(),
             content: "```js\nconsole.log(1)\n```".into(),
         }];
@@ -876,6 +1512,8 @@ Line two
                 id: "b-1".into(),
                 block_id: None,
                 outdent: None,
+                color: None,
+                bg: None,
                 language: "markdown".into(),
                 content: "```js\nconsole.log(1)\n```".into(),
             }
@@ -1065,5 +1703,202 @@ SELECT 1;
         ));
 
         assert_eq!(serialize_markdown(&blocks), md);
+    }
+
+    #[test]
+    fn table_blocks_parse_and_round_trip() {
+        let md = "\
+# Data
+
+| Feature | Status | Link | Notes |
+| --- | :---: | :--- | ---: |
+| **Tables** | `ready` | [[notes/plan|Plan]] | a \\| b<br>line2 |
+| ==Highlights== | done | [[hero]] | 100 |
+";
+        let blocks = parse_markdown(md);
+        assert_eq!(blocks.len(), 2);
+        match &blocks[1] {
+            Block::Table {
+                alignments, rows, ..
+            } => {
+                assert_eq!(alignments, &vec!["", "center", "left", "right"]);
+                assert_eq!(rows.len(), 3);
+                assert_eq!(rows[0], vec!["Feature", "Status", "Link", "Notes"]);
+                assert_eq!(
+                    rows[1],
+                    vec!["**Tables**", "`ready`", "[[notes/plan|Plan]]", "a | b\nline2"]
+                );
+                assert_eq!(rows[2], vec!["==Highlights==", "done", "[[hero]]", "100"]);
+            }
+            other => panic!("expected table block, got {other:?}"),
+        }
+
+        assert_eq!(serialize_markdown(&blocks), md);
+    }
+
+    #[test]
+    fn table_with_block_id_and_outdent_round_trips() {
+        let md = "\
+# Section
+
+<!-- outdent:1 -->
+| Key | Value |
+| --- | --- |
+| A | 1 |
+^tbl9a2
+";
+        let blocks = parse_markdown(md);
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(
+            &blocks[1],
+            Block::Table {
+                block_id: Some(bid),
+                outdent: Some(1),
+                rows,
+                ..
+            } if bid == "tbl9a2" && rows.len() == 2
+        ));
+        assert_eq!(serialize_markdown(&blocks), md);
+    }
+
+    #[test]
+    fn table_normalizes_ragged_rows_and_ignores_setext_heading() {
+        let md = "\
+Not A Table
+---
+
+| Only |
+| --- |
+| Val |
+
+| A | B |
+| --- | --- |
+| 1 |
+| 2 | 3 | extra |
+";
+        let blocks = parse_markdown(md);
+        assert_eq!(blocks.len(), 3);
+        assert!(matches!(&blocks[0], Block::Paragraph { .. }));
+        assert!(matches!(
+            &blocks[1],
+            Block::Table { rows, .. } if rows == &vec![vec!["Only"], vec!["Val"]]
+        ));
+        assert!(matches!(
+            &blocks[2],
+            Block::Table { rows, .. } if rows == &vec![
+                vec!["A", "B"],
+                vec!["1", ""],
+                vec!["2", "3"]
+            ]
+        ));
+    }
+
+    #[test]
+    fn table_wikilinks_extract_and_rewrite() {
+        let md = "\
+| Item | Ref |
+| --- | --- |
+| Spec | [[notes/old|Old Spec]] |
+";
+        let links = extract_links(md);
+        assert_eq!(
+            links,
+            vec![ExtractedLink {
+                target: "notes/old".into(),
+                label: Some("Old Spec".into()),
+            }]
+        );
+
+        let (updated, changed) =
+            rewrite_wikilinks(md, "notes/old", "old", "notes/new_spec", true);
+        assert!(changed);
+        assert!(updated.contains("| Spec | [[notes/new_spec|Old Spec]] |"));
+    }
+
+    #[test]
+    fn table_col_widths_and_outdent_round_trip() {
+        let md = "\
+# Section
+
+<!-- outdent:1 -->
+<!-- col-widths:180,460 -->
+| Topic | Confirmed direction |
+| --- | --- |
+| Architecture | Reusable Rust engine library |
+";
+        let blocks = parse_markdown(md);
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(
+            &blocks[1],
+            Block::Table {
+                outdent: Some(1),
+                col_widths,
+                rows,
+                ..
+            } if col_widths == &vec![180, 460] && rows.len() == 2
+        ));
+        assert_eq!(serialize_markdown(&blocks), md);
+
+        let plain_md = "\
+| A | B |
+| --- | --- |
+| 1 | 2 |
+";
+        let plain_blocks = parse_markdown(plain_md);
+        assert!(matches!(
+            &plain_blocks[0],
+            Block::Table { col_widths, .. } if col_widths.is_empty()
+        ));
+        assert!(!serialize_markdown(&plain_blocks).contains("col-widths"));
+    }
+
+    #[test]
+    fn block_colors_round_trip_across_block_types() {
+        let md = "\
+<!-- style:bg=blue -->
+# Colored Heading
+
+<!-- style:color=red;bg=yellow -->
+Highlighted warning text
+
+<!-- outdent:1 -->
+<!-- style:color=green -->
+Top-level green note
+
+<!-- style:bg=gray -->
+<!-- col-widths:140,320 -->
+| Key | Value |
+| --- | --- |
+| A | 1 |
+^tblc1
+
+Plain uncolored block
+";
+        let blocks = parse_markdown(md);
+        assert_eq!(blocks.len(), 5);
+        assert!(matches!(
+            &blocks[0],
+            Block::Heading { color: None, bg: Some(b), content, .. } if b == "blue" && content == "Colored Heading"
+        ));
+        assert!(matches!(
+            &blocks[1],
+            Block::Paragraph { color: Some(c), bg: Some(b), content, .. } if c == "red" && b == "yellow" && content == "Highlighted warning text"
+        ));
+        assert!(matches!(
+            &blocks[2],
+            Block::Paragraph { outdent: Some(1), color: Some(c), bg: None, .. } if c == "green"
+        ));
+        assert!(matches!(
+            &blocks[3],
+            Block::Table { block_id: Some(bid), bg: Some(b), col_widths, .. } if bid == "tblc1" && b == "gray" && col_widths == &vec![140, 320]
+        ));
+        assert!(matches!(
+            &blocks[4],
+            Block::Paragraph { color: None, bg: None, content, .. } if content == "Plain uncolored block"
+        ));
+
+        let serialized = serialize_markdown(&blocks);
+        assert_eq!(serialized, md);
+        assert!(!serialize_markdown(&[blocks[4].clone()]).contains("<!-- style:"));
     }
 }

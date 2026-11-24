@@ -7,10 +7,20 @@ pub mod vault;
 
 use commands::AppState;
 use std::sync::Mutex;
+use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .setup(|app| {
+            let saved = prefs::load_prefs();
+            if saved.zoom_percent != prefs::ZOOM_DEFAULT_PERCENT {
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.set_zoom((saved.zoom_percent as f64) / 100.0);
+                }
+            }
+            Ok(())
+        })
         .manage(AppState {
             vault_root: Mutex::new(None),
         })
@@ -32,6 +42,7 @@ pub fn run() {
             commands::delete_entry,
             commands::resolve_link,
             commands::save_ui_prefs,
+            commands::set_window_zoom,
             commands::save_pasted_image,
             commands::read_image_data_url,
             commands::terminal_start,

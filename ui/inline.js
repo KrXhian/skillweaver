@@ -1,7 +1,52 @@
 /**
  * Deterministic inline Markdown <-> DOM codec for Skillweaver blocks.
- * Supports bold (**text**), inline code (`code`), [[wikilinks]], and [label](target.md).
+ * Supports bold (**text**), inline code (`code`), ==highlight==,
+ * <span data-color/bg="..."> inline colors, [[wikilinks]], and [label](target.md).
  */
+
+export const NOTION_COLORS = [
+  "gray",
+  "brown",
+  "orange",
+  "yellow",
+  "green",
+  "blue",
+  "purple",
+  "pink",
+  "red",
+];
+
+const VALID_COLOR_SET = new Set(NOTION_COLORS);
+
+export function isValidColorName(name) {
+  return typeof name === "string" && VALID_COLOR_SET.has(name);
+}
+
+function findMatchingSpanClose(text, startIdx) {
+  let depth = 1;
+  let pos = startIdx;
+  while (pos < text.length) {
+    const closeIdx = text.indexOf("</span>", pos);
+    if (closeIdx === -1) return -1;
+    let openIdx = text.indexOf("<span", pos);
+    while (openIdx !== -1 && openIdx < closeIdx) {
+      const nextCh = text[openIdx + 5];
+      if (nextCh === ">" || nextCh === " " || nextCh === "\t" || nextCh === "\n") {
+        break;
+      }
+      openIdx = text.indexOf("<span", openIdx + 5);
+    }
+    if (openIdx !== -1 && openIdx < closeIdx) {
+      depth += 1;
+      pos = openIdx + 5;
+    } else {
+      depth -= 1;
+      if (depth === 0) return closeIdx;
+      pos = closeIdx + 7;
+    }
+  }
+  return -1;
+}
 
 export function escapeHtml(str) {
   return String(str)
@@ -167,6 +212,35 @@ function tokenizeInline(text, pageLookup, insideBold = false) {
       }
     }
 
+    // Inline color span: <span data-color="..." data-bg="...">...</span>
+    if (ch === "<" && text.startsWith("<span", i)) {
+      const spanMatch = text
+        .slice(i)
+        .match(
+          /^<span((?:\s+data-(?:color|bg)="(?:gray|brown|orange|yellow|green|blue|purple|pink|red)"){1,2})>/
+        );
+      if (spanMatch) {
+        const attrs = spanMatch[1];
+        const colorM = attrs.match(/data-color="([a-z]+)"/);
+        const bgM = attrs.match(/data-bg="([a-z]+)"/);
+        const c = colorM && isValidColorName(colorM[1]) ? colorM[1] : "";
+        const bg = bgM && isValidColorName(bgM[1]) ? bgM[1] : "";
+        if (c || bg) {
+          const contentStart = i + spanMatch[0].length;
+          const closeIdx = findMatchingSpanClose(text, contentStart);
+          if (closeIdx !== -1) {
+            const inner = text.slice(contentStart, closeIdx);
+            const cls = `sw-inline-color${c ? ` sw-color-${c}` : ""}${bg ? ` sw-bg-${bg}` : ""}`;
+            const cAttr = c ? ` data-color="${c}"` : "";
+            const bgAttr = bg ? ` data-bg="${bg}"` : "";
+            out += `<span class="${cls}"${cAttr}${bgAttr}>${tokenizeInline(inner, pageLookup, insideBold)}</span>`;
+            i = closeIdx + 7;
+            continue;
+          }
+        }
+      }
+    }
+
     out += escapeHtml(ch);
     i += 1;
   }
@@ -205,6 +279,21 @@ function serializeChildNodes(parent, insideBold = false) {
       const label = node.dataset.label || "";
       if (target) {
         out += label ? `[[${target}|${label}]]` : `[[${target}]]`;
+      }
+      continue;
+    }
+
+    if (node.classList.contains("sw-inline-color")) {
+      const inner = serializeChildNodes(node, insideBold);
+      if (inner.length === 0) continue;
+      const c = isValidColorName(node.dataset.color) ? node.dataset.color : "";
+      const bg = isValidColorName(node.dataset.bg) ? node.dataset.bg : "";
+      if (!c && !bg) {
+        out += inner;
+      } else {
+        const cAttr = c ? ` data-color="${c}"` : "";
+        const bgAttr = bg ? ` data-bg="${bg}"` : "";
+        out += `<span${cAttr}${bgAttr}>${inner}</span>`;
       }
       continue;
     }
