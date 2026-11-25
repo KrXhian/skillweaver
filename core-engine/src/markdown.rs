@@ -27,6 +27,66 @@ pub enum Block {
         bg: Option<String>,
         content: String,
     },
+    BulletList {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outdent: Option<u8>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        color: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bg: Option<String>,
+        content: String,
+    },
+    NumberedList {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outdent: Option<u8>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        color: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bg: Option<String>,
+        content: String,
+    },
+    Todo {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outdent: Option<u8>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        color: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bg: Option<String>,
+        checked: bool,
+        content: String,
+    },
+    Quote {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outdent: Option<u8>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        color: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bg: Option<String>,
+        content: String,
+    },
+    Divider {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outdent: Option<u8>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        color: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bg: Option<String>,
+    },
     Code {
         id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -251,12 +311,106 @@ fn strip_trailing_block_id(text: &str) -> (&str, Option<String>) {
 }
 
 fn parse_standalone_block_id_line(trimmed: &str) -> Option<String> {
+    if trimmed.is_empty() {
+        return None;
+    }
     let rest = trimmed.strip_prefix('^')?;
     if is_valid_block_id(rest) {
         Some(rest.to_string())
     } else {
         None
     }
+}
+
+fn parse_divider_line(trimmed: &str) -> bool {
+    let chars: Vec<char> = trimmed.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+    if chars.len() < 3 {
+        return false;
+    }
+    let marker = chars[0];
+    (marker == '-' || marker == '*' || marker == '_') && chars.iter().all(|&c| c == marker)
+}
+
+fn parse_todo_line(line: &str) -> Option<(bool, String)> {
+    let leading_spaces = line.bytes().take_while(|&b| b == b' ').count();
+    if leading_spaces > 3 {
+        return None;
+    }
+    let rest = &line[leading_spaces..];
+    let first = rest.as_bytes().first().copied()?;
+    if first != b'-' && first != b'*' && first != b'+' {
+        return None;
+    }
+    let after_bullet = &rest[1..];
+    if !after_bullet.starts_with(' ') && !after_bullet.starts_with('\t') {
+        return None;
+    }
+    let after_ws = after_bullet.trim_start_matches([' ', '\t']);
+    let bytes = after_ws.as_bytes();
+    if bytes.len() < 3 || bytes[0] != b'[' || bytes[2] != b']' {
+        return None;
+    }
+    let checked = match bytes[1] {
+        b' ' => false,
+        b'x' | b'X' => true,
+        _ => return None,
+    };
+    let tail = &after_ws[3..];
+    if tail.is_empty() {
+        return Some((checked, String::new()));
+    }
+    if tail.starts_with(' ') || tail.starts_with('\t') {
+        return Some((checked, tail[1..].to_string()));
+    }
+    None
+}
+
+fn parse_bullet_line(line: &str) -> Option<String> {
+    if parse_divider_line(line.trim()) || parse_todo_line(line).is_some() {
+        return None;
+    }
+    let leading_spaces = line.bytes().take_while(|&b| b == b' ').count();
+    if leading_spaces > 3 {
+        return None;
+    }
+    let rest = &line[leading_spaces..];
+    let first = rest.as_bytes().first().copied()?;
+    if first != b'-' && first != b'*' && first != b'+' {
+        return None;
+    }
+    let after = &rest[1..];
+    if !after.starts_with(' ') && !after.starts_with('\t') {
+        return None;
+    }
+    Some(after[1..].to_string())
+}
+
+fn parse_numbered_line(line: &str) -> Option<String> {
+    let leading_spaces = line.bytes().take_while(|&b| b == b' ').count();
+    if leading_spaces > 3 {
+        return None;
+    }
+    let rest = &line[leading_spaces..];
+    let digits = rest.bytes().take_while(|b| b.is_ascii_digit()).count();
+    if digits == 0 || digits > 9 {
+        return None;
+    }
+    let after_digits = &rest[digits..];
+    let after_dot = after_digits.strip_prefix('.')?;
+    if !after_dot.starts_with(' ') && !after_dot.starts_with('\t') {
+        return None;
+    }
+    Some(after_dot[1..].to_string())
+}
+
+fn parse_quote_line(line: &str) -> Option<String> {
+    let leading_spaces = line.bytes().take_while(|&b| b == b' ').count();
+    if leading_spaces > 3 {
+        return None;
+    }
+    let rest = line[leading_spaces..].strip_prefix('>')?;
+    let content = rest.strip_prefix(' ').unwrap_or(rest);
+    Some(content.to_string())
 }
 
 fn parse_outdent_comment(trimmed: &str) -> Option<u8> {
@@ -825,6 +979,10 @@ pub fn parse_markdown(input: &str) -> Vec<Block> {
                         *block_id = Some(bid);
                         true
                     }
+                    Some(Block::Divider { block_id, .. }) if block_id.is_none() => {
+                        *block_id = Some(bid);
+                        true
+                    }
                     _ => false,
                 };
                 if attached {
@@ -866,6 +1024,11 @@ pub fn parse_markdown(input: &str) -> Vec<Block> {
                             || parse_style_comment(body_trimmed).is_some()
                             || parse_col_widths_comment(body_trimmed).is_some()
                             || parse_standalone_block_id_line(body_trimmed).is_some()
+                            || parse_quote_line(body_line).is_some()
+                            || parse_todo_line(body_line).is_some()
+                            || parse_bullet_line(body_line).is_some()
+                            || parse_numbered_line(body_line).is_some()
+                            || parse_divider_line(body_trimmed)
                         {
                             break;
                         }
@@ -889,6 +1052,136 @@ pub fn parse_markdown(input: &str) -> Vec<Block> {
                     continue;
                 }
             }
+        }
+
+        if para_lines.is_empty() && parse_divider_line(trimmed) {
+            pending_col_widths.clear();
+            blocks.push(Block::Divider {
+                id: next_id(&mut counter),
+                block_id: None,
+                outdent: pending_outdent.take(),
+                color: pending_color.take(),
+                bg: pending_bg.take(),
+            });
+            i += 1;
+            continue;
+        }
+
+        if let Some(first_quote) = parse_quote_line(line) {
+            flush_para(
+                &mut para_lines,
+                &mut blocks,
+                &mut counter,
+                &mut pending_outdent,
+                &mut pending_col_widths,
+                &mut pending_color,
+                &mut pending_bg,
+            );
+            pending_col_widths.clear();
+            let mut quote_lines = vec![first_quote];
+            i += 1;
+            while i < lines.len() {
+                let next_trimmed = lines[i].trim();
+                if next_trimmed.is_empty()
+                    || parse_fence_open(lines[i]).is_some()
+                    || parse_atx_heading(lines[i]).is_some()
+                    || parse_outdent_comment(next_trimmed).is_some()
+                    || parse_style_comment(next_trimmed).is_some()
+                    || parse_col_widths_comment(next_trimmed).is_some()
+                {
+                    break;
+                }
+                if let Some(q_line) = parse_quote_line(lines[i]) {
+                    quote_lines.push(q_line);
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            let joined = quote_lines.join("\n");
+            let (clean, block_id) = strip_trailing_block_id(&joined);
+            blocks.push(Block::Quote {
+                id: next_id(&mut counter),
+                block_id,
+                outdent: pending_outdent.take(),
+                color: pending_color.take(),
+                bg: pending_bg.take(),
+                content: clean.to_string(),
+            });
+            continue;
+        }
+
+        if let Some((checked, content)) = parse_todo_line(line) {
+            flush_para(
+                &mut para_lines,
+                &mut blocks,
+                &mut counter,
+                &mut pending_outdent,
+                &mut pending_col_widths,
+                &mut pending_color,
+                &mut pending_bg,
+            );
+            pending_col_widths.clear();
+            let (clean, block_id) = strip_trailing_block_id(&content);
+            blocks.push(Block::Todo {
+                id: next_id(&mut counter),
+                block_id,
+                outdent: pending_outdent.take(),
+                color: pending_color.take(),
+                bg: pending_bg.take(),
+                checked,
+                content: clean.to_string(),
+            });
+            i += 1;
+            continue;
+        }
+
+        if let Some(content) = parse_bullet_line(line) {
+            flush_para(
+                &mut para_lines,
+                &mut blocks,
+                &mut counter,
+                &mut pending_outdent,
+                &mut pending_col_widths,
+                &mut pending_color,
+                &mut pending_bg,
+            );
+            pending_col_widths.clear();
+            let (clean, block_id) = strip_trailing_block_id(&content);
+            blocks.push(Block::BulletList {
+                id: next_id(&mut counter),
+                block_id,
+                outdent: pending_outdent.take(),
+                color: pending_color.take(),
+                bg: pending_bg.take(),
+                content: clean.to_string(),
+            });
+            i += 1;
+            continue;
+        }
+
+        if let Some(content) = parse_numbered_line(line) {
+            flush_para(
+                &mut para_lines,
+                &mut blocks,
+                &mut counter,
+                &mut pending_outdent,
+                &mut pending_col_widths,
+                &mut pending_color,
+                &mut pending_bg,
+            );
+            pending_col_widths.clear();
+            let (clean, block_id) = strip_trailing_block_id(&content);
+            blocks.push(Block::NumberedList {
+                id: next_id(&mut counter),
+                block_id,
+                outdent: pending_outdent.take(),
+                color: pending_color.take(),
+                bg: pending_bg.take(),
+                content: clean.to_string(),
+            });
+            i += 1;
+            continue;
         }
 
         if trimmed.is_empty() {
@@ -962,8 +1255,30 @@ pub fn serialize_markdown(blocks: &[Block]) -> String {
         }
     }
 
-    let mut parts = Vec::with_capacity(blocks.len());
+    let mut out = String::new();
+    let mut numbered_index = 0usize;
+    let mut prev_list_kind: u8 = 0; // 1 = bullet, 2 = numbered, 3 = todo, 0 = other
+
+    let push_serialized = |out: &mut String,
+                           prev_kind: &mut u8,
+                           kind: u8,
+                           has_prefix_comments: bool,
+                           chunk: &str| {
+        if !out.is_empty() {
+            if kind != 0 && *prev_kind == kind && !has_prefix_comments {
+                out.push('\n');
+            } else {
+                out.push_str("\n\n");
+            }
+        }
+        out.push_str(chunk);
+        *prev_kind = kind;
+    };
+
     for block in blocks {
+        if !matches!(block, Block::NumberedList { .. }) {
+            numbered_index = 0;
+        }
         match block {
             Block::Heading {
                 block_id,
@@ -975,20 +1290,20 @@ pub fn serialize_markdown(blocks: &[Block]) -> String {
             } => {
                 let hashes = "#".repeat((*level).clamp(1, 6) as usize);
                 let text = content.trim_end();
-                let mut out = String::new();
+                let mut s = String::new();
                 if let Some(style) = format_style_comment(color.as_deref(), bg.as_deref()) {
-                    out.push_str(&style);
-                    out.push('\n');
+                    s.push_str(&style);
+                    s.push('\n');
                 }
                 if text.is_empty() {
-                    out.push_str(&hashes);
+                    s.push_str(&hashes);
                 } else {
-                    out.push_str(&format!("{hashes} {text}"));
+                    s.push_str(&format!("{hashes} {text}"));
                 }
                 if let Some(bid) = block_id.as_deref().filter(|s| !s.is_empty()) {
-                    out.push_str(&format!(" ^{bid}"));
+                    s.push_str(&format!(" ^{bid}"));
                 }
-                parts.push(out);
+                push_serialized(&mut out, &mut prev_list_kind, 0, false, &s);
             }
             Block::Paragraph {
                 block_id,
@@ -998,22 +1313,169 @@ pub fn serialize_markdown(blocks: &[Block]) -> String {
                 content,
                 ..
             } => {
-                let mut out = String::new();
+                let mut s = String::new();
                 if let Some(d) = (*outdent).filter(|&v| v > 0) {
-                    out.push_str(&format!("<!-- outdent:{d} -->\n"));
+                    s.push_str(&format!("<!-- outdent:{d} -->\n"));
                 }
                 if let Some(style) = format_style_comment(color.as_deref(), bg.as_deref()) {
-                    out.push_str(&style);
-                    out.push('\n');
+                    s.push_str(&style);
+                    s.push('\n');
                 }
-                out.push_str(content);
+                s.push_str(content);
                 if let Some(bid) = block_id.as_deref().filter(|s| !s.is_empty()) {
                     if !content.is_empty() {
-                        out.push(' ');
+                        s.push(' ');
                     }
-                    out.push_str(&format!("^{bid}"));
+                    s.push_str(&format!("^{bid}"));
                 }
-                parts.push(out);
+                push_serialized(&mut out, &mut prev_list_kind, 0, false, &s);
+            }
+            Block::BulletList {
+                block_id,
+                outdent,
+                color,
+                bg,
+                content,
+                ..
+            } => {
+                let mut s = String::new();
+                let mut has_prefix = false;
+                if let Some(d) = (*outdent).filter(|&v| v > 0) {
+                    s.push_str(&format!("<!-- outdent:{d} -->\n"));
+                    has_prefix = true;
+                }
+                if let Some(style) = format_style_comment(color.as_deref(), bg.as_deref()) {
+                    s.push_str(&style);
+                    s.push('\n');
+                    has_prefix = true;
+                }
+                if content.is_empty() {
+                    s.push_str("- ");
+                } else {
+                    s.push_str(&format!("- {content}"));
+                }
+                if let Some(bid) = block_id.as_deref().filter(|s| !s.is_empty()) {
+                    s.push_str(&format!(" ^{bid}"));
+                }
+                push_serialized(&mut out, &mut prev_list_kind, 1, has_prefix, &s);
+            }
+            Block::NumberedList {
+                block_id,
+                outdent,
+                color,
+                bg,
+                content,
+                ..
+            } => {
+                numbered_index += 1;
+                let mut s = String::new();
+                let mut has_prefix = false;
+                if let Some(d) = (*outdent).filter(|&v| v > 0) {
+                    s.push_str(&format!("<!-- outdent:{d} -->\n"));
+                    has_prefix = true;
+                }
+                if let Some(style) = format_style_comment(color.as_deref(), bg.as_deref()) {
+                    s.push_str(&style);
+                    s.push('\n');
+                    has_prefix = true;
+                }
+                if content.is_empty() {
+                    s.push_str(&format!("{numbered_index}. "));
+                } else {
+                    s.push_str(&format!("{numbered_index}. {content}"));
+                }
+                if let Some(bid) = block_id.as_deref().filter(|s| !s.is_empty()) {
+                    s.push_str(&format!(" ^{bid}"));
+                }
+                push_serialized(&mut out, &mut prev_list_kind, 2, has_prefix, &s);
+            }
+            Block::Todo {
+                block_id,
+                outdent,
+                color,
+                bg,
+                checked,
+                content,
+                ..
+            } => {
+                let mut s = String::new();
+                let mut has_prefix = false;
+                if let Some(d) = (*outdent).filter(|&v| v > 0) {
+                    s.push_str(&format!("<!-- outdent:{d} -->\n"));
+                    has_prefix = true;
+                }
+                if let Some(style) = format_style_comment(color.as_deref(), bg.as_deref()) {
+                    s.push_str(&style);
+                    s.push('\n');
+                    has_prefix = true;
+                }
+                let mark = if *checked { "x" } else { " " };
+                if content.is_empty() {
+                    s.push_str(&format!("- [{mark}] "));
+                } else {
+                    s.push_str(&format!("- [{mark}] {content}"));
+                }
+                if let Some(bid) = block_id.as_deref().filter(|s| !s.is_empty()) {
+                    s.push_str(&format!(" ^{bid}"));
+                }
+                push_serialized(&mut out, &mut prev_list_kind, 3, has_prefix, &s);
+            }
+            Block::Quote {
+                block_id,
+                outdent,
+                color,
+                bg,
+                content,
+                ..
+            } => {
+                let mut s = String::new();
+                if let Some(d) = (*outdent).filter(|&v| v > 0) {
+                    s.push_str(&format!("<!-- outdent:{d} -->\n"));
+                }
+                if let Some(style) = format_style_comment(color.as_deref(), bg.as_deref()) {
+                    s.push_str(&style);
+                    s.push('\n');
+                }
+                let quote_lines: Vec<String> = if content.is_empty() {
+                    vec![">".to_string()]
+                } else {
+                    content
+                        .split('\n')
+                        .map(|line| {
+                            if line.is_empty() {
+                                ">".to_string()
+                            } else {
+                                format!("> {line}")
+                            }
+                        })
+                        .collect()
+                };
+                s.push_str(&quote_lines.join("\n"));
+                if let Some(bid) = block_id.as_deref().filter(|s| !s.is_empty()) {
+                    s.push_str(&format!(" ^{bid}"));
+                }
+                push_serialized(&mut out, &mut prev_list_kind, 0, false, &s);
+            }
+            Block::Divider {
+                block_id,
+                outdent,
+                color,
+                bg,
+                ..
+            } => {
+                let mut s = String::new();
+                if let Some(d) = (*outdent).filter(|&v| v > 0) {
+                    s.push_str(&format!("<!-- outdent:{d} -->\n"));
+                }
+                if let Some(style) = format_style_comment(color.as_deref(), bg.as_deref()) {
+                    s.push_str(&style);
+                    s.push('\n');
+                }
+                s.push_str("---");
+                if let Some(bid) = block_id.as_deref().filter(|s| !s.is_empty()) {
+                    s.push_str(&format!("\n^{bid}"));
+                }
+                push_serialized(&mut out, &mut prev_list_kind, 0, false, &s);
             }
             Block::Code {
                 block_id,
@@ -1043,7 +1505,7 @@ pub fn serialize_markdown(blocks: &[Block]) -> String {
                 if let Some(bid) = block_id.as_deref().filter(|s| !s.is_empty()) {
                     s.push_str(&format!("\n^{bid}"));
                 }
-                parts.push(s);
+                push_serialized(&mut out, &mut prev_list_kind, 0, false, &s);
             }
             Block::Image {
                 block_id,
@@ -1072,7 +1534,7 @@ pub fn serialize_markdown(blocks: &[Block]) -> String {
                 if let Some(bid) = block_id.as_deref().filter(|s| !s.is_empty()) {
                     s.push_str(&format!("\n^{bid}"));
                 }
-                parts.push(s);
+                push_serialized(&mut out, &mut prev_list_kind, 0, false, &s);
             }
             Block::Table {
                 block_id,
@@ -1139,12 +1601,11 @@ pub fn serialize_markdown(blocks: &[Block]) -> String {
                 if let Some(bid) = block_id.as_deref().filter(|s| !s.is_empty()) {
                     lines_out.push(format!("^{bid}"));
                 }
-                parts.push(lines_out.join("\n"));
+                push_serialized(&mut out, &mut prev_list_kind, 0, false, &lines_out.join("\n"));
             }
         }
     }
 
-    let mut out = parts.join("\n\n");
     if !out.ends_with('\n') {
         out.push('\n');
     }
@@ -1614,9 +2075,9 @@ Link [[notes/old]] and [[old|Custom]] and `[[notes/old]]`.
         ));
         assert_eq!(serialize_markdown(&blocks), md);
 
-        let obsidian_blocks = parse_markdown("![[assets/pic.png|Diagram]]\n");
+        let wikilink_image_blocks = parse_markdown("![[assets/pic.png|Diagram]]\n");
         assert!(matches!(
-            &obsidian_blocks[0],
+            &wikilink_image_blocks[0],
             Block::Image { src, alt, .. } if src == "assets/pic.png" && alt == "Diagram"
         ));
         assert!(extract_links("See ![[assets/pic.png|Diagram]] and [[hero]].").len() == 1);
@@ -1900,5 +2361,61 @@ Plain uncolored block
         let serialized = serialize_markdown(&blocks);
         assert_eq!(serialized, md);
         assert!(!serialize_markdown(&[blocks[4].clone()]).contains("<!-- style:"));
+    }
+
+    #[test]
+    fn lists_todos_quotes_and_dividers_round_trip() {
+        let md = "\
+- First bullet
+- Second bullet ^bul2a
+
+1. Step one
+2. Step two
+
+- [ ] Unchecked task
+- [x] Done task ^todo9
+
+> Quoted line one
+> Quoted line two ^quo4a
+
+---
+^div7b
+";
+        let blocks = parse_markdown(md);
+        assert_eq!(blocks.len(), 8);
+        assert!(matches!(
+            &blocks[0],
+            Block::BulletList { block_id: None, content, .. } if content == "First bullet"
+        ));
+        assert!(matches!(
+            &blocks[1],
+            Block::BulletList { block_id: Some(bid), content, .. } if bid == "bul2a" && content == "Second bullet"
+        ));
+        assert!(matches!(
+            &blocks[2],
+            Block::NumberedList { content, .. } if content == "Step one"
+        ));
+        assert!(matches!(
+            &blocks[3],
+            Block::NumberedList { content, .. } if content == "Step two"
+        ));
+        assert!(matches!(
+            &blocks[4],
+            Block::Todo { checked: false, content, .. } if content == "Unchecked task"
+        ));
+        assert!(matches!(
+            &blocks[5],
+            Block::Todo { checked: true, block_id: Some(bid), content, .. } if bid == "todo9" && content == "Done task"
+        ));
+        assert!(matches!(
+            &blocks[6],
+            Block::Quote { block_id: Some(bid), content, .. } if bid == "quo4a" && content == "Quoted line one\nQuoted line two"
+        ));
+        assert!(matches!(
+            &blocks[7],
+            Block::Divider { block_id: Some(bid), .. } if bid == "div7b"
+        ));
+
+        assert_eq!(serialize_markdown(&blocks), md);
     }
 }

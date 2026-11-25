@@ -120,6 +120,11 @@ export function parseEditOps(rawJson) {
 export function summarizeBlockPayload(block) {
   if (!block) return "";
   if (block.type === "heading") return `${"#".repeat(block.level || 1)} ${block.content || ""}`;
+  if (block.type === "bullet_list") return `• ${block.content || ""}`;
+  if (block.type === "numbered_list") return `1. ${block.content || ""}`;
+  if (block.type === "todo") return `[${block.checked ? "x" : " "}] ${block.content || ""}`;
+  if (block.type === "quote") return `> ${block.content || ""}`;
+  if (block.type === "divider") return "--- (Divider)";
   if (block.type === "code") return `\`\`\`${block.language || ""}\n${block.content || ""}\n\`\`\``;
   if (block.type === "table") {
     const rows = Array.isArray(block.rows)
@@ -204,10 +209,11 @@ export function renderInlineFormattedText(text) {
       return `\uE000SWLINK${idx}\uE001`;
     }
   );
-  // Render clickable [[wikilinks]], inline code, and bold cleanly inside assistant bubbles
+  // Render clickable [[wikilinks]], inline code, bold, and italic cleanly inside assistant bubbles
   const formatted = escapeHtml(withTokens)
     .replace(/`([^`\n]+)`/g, '<code class="inline-code">$1</code>')
     .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[^*])\*([^*\s\n](?:[^*\n]*[^*\s\n])?)\*(?!\*)/g, "$1<em>$2</em>")
     .replace(/\n/g, "<br>");
   return formatted.replace(/\uE000SWLINK(\d+)\uE001/g, (_, i) => tokens[Number(i)] || "");
 }

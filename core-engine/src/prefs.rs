@@ -206,8 +206,8 @@ mod tests {
     #[test]
     fn clean_folder_path_strips_extended_windows_prefix() {
         assert_eq!(
-            clean_folder_path(r"\\?\C:\Users\Krist\notes"),
-            r"C:\Users\Krist\notes"
+            clean_folder_path(r"\\?\C:\Users\alice\notes"),
+            r"C:\Users\alice\notes"
         );
         assert_eq!(
             clean_folder_path(r"\\?\UNC\server\share\notes"),
@@ -218,12 +218,12 @@ mod tests {
         let prefs_file = dir.join("ui.prefs");
         fs::write(
             &prefs_file,
-            r#"{"last_folder":"\\\\?\\C:\\Users\\Krist\\notes","theme":"light"}"#,
+            r#"{"last_folder":"\\\\?\\C:\\Users\\alice\\notes","theme":"light"}"#,
         )
         .unwrap();
 
         let loaded = load_prefs_from(&prefs_file);
-        assert_eq!(loaded.last_folder.as_deref(), Some(r"C:\Users\Krist\notes"));
+        assert_eq!(loaded.last_folder.as_deref(), Some(r"C:\Users\alice\notes"));
         assert_eq!(loaded.theme, "light");
 
         let _ = fs::remove_dir_all(&dir);

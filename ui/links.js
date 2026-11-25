@@ -303,7 +303,7 @@ export class LinkAutocomplete {
 }
 
 /**
- * VS Code / Obsidian-style Ctrl+P quick switcher modal.
+ * Ctrl+P quick switcher modal.
  */
 export class QuickSwitcher {
   constructor(backdropEl, inputEl, listEl, { getPages, onSelect }) {

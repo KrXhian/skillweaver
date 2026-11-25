@@ -484,8 +484,8 @@ mod tests {
     #[test]
     fn parse_prompt_marker_extracts_clean_cwd() {
         assert_eq!(
-            parse_prompt_marker(r"__SW_PROMPT__\\?\C:\Users\Krist\vault"),
-            Some(r"C:\Users\Krist\vault".to_string())
+            parse_prompt_marker(r"__SW_PROMPT__\\?\C:\Users\alice\vault"),
+            Some(r"C:\Users\alice\vault".to_string())
         );
         assert_eq!(parse_prompt_marker("normal output line"), None);
     }
@@ -493,8 +493,8 @@ mod tests {
     #[test]
     fn escape_ps_single_quoted_doubles_quotes() {
         assert_eq!(
-            escape_ps_single_quoted(r"C:\Krist's Notes\md"),
-            r"C:\Krist''s Notes\md"
+            escape_ps_single_quoted(r"C:\Alice's Notes\md"),
+            r"C:\Alice''s Notes\md"
         );
     }
 

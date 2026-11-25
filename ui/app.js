@@ -218,6 +218,7 @@ const editor = new BlockEditor(
     containerEl: el.blocksContainer,
     selectionToolbarEl: document.getElementById("selection-toolbar"),
     boldBtn: document.getElementById("btn-sel-bold"),
+    italicBtn: document.getElementById("btn-sel-italic"),
     inlineCodeBtn: document.getElementById("btn-sel-code"),
     highlightBtn: document.getElementById("btn-sel-highlight"),
     colorSelBtn: document.getElementById("btn-sel-color"),
@@ -573,7 +574,7 @@ function updateViewVisibility() {
     el.btnWelcomeNew.hidden = !hasVault;
     el.welcomeSubtitle.innerHTML = hasVault
       ? `Folder <strong>${escapeHtml(state.vault.root_name)}</strong> is open. Select a <code>.md</code> file or create a new note.`
-      : `Lightweight Notion-style block editor over plain <code>.md</code> folders.`;
+      : `Lightweight block-based editor over plain <code>.md</code> folders.`;
     el.breadcrumb.textContent = hasVault ? state.vault.root_name : "Skillweaver";
     setSaveStatus("saved");
     return;

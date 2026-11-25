@@ -114,7 +114,7 @@
           <div class="welcome-card">
             <h1>Skillweaver</h1>
             <p id="welcome-subtitle" class="welcome-subtitle">
-              Lightweight Notion-style block editor over plain <code>.md</code> folders.
+              Lightweight block-based editor over plain <code>.md</code> folders.
             </p>
             <div class="welcome-actions">
               <button id="btn-welcome-open" class="primary-btn">Open Folder <kbd>Ctrl+O</kbd></button>
@@ -125,7 +125,7 @@
               <div class="cheat-row"><kbd>Ctrl+B</kbd><span>Bold text &amp; <code>`inline code`</code></span></div>
               <div class="cheat-row"><kbd>```</kbd><span>Fenced Code Block</span></div>
               <div class="cheat-row"><kbd>/table</kbd><span>Table block (or type <code>| A | B |</code> + Enter)</span></div>
-              <div class="cheat-row"><kbd>@@</kbd><span>Link any <code>.md</code> page (Obsidian <code>[[wikilinks]]</code>)</span></div>
+              <div class="cheat-row"><kbd>@@</kbd><span>Link any <code>.md</code> page (<code>[[wikilinks]]</code>)</span></div>
             </div>
             <div class="welcome-credit">Skillweaver&trade; &middot; Created by the Blue Frog Foundation</div>
           </div>
@@ -161,7 +161,7 @@
           <textarea id="raw-textarea" class="raw-textarea" spellcheck="false" placeholder="Write Markdown..."></textarea>
         </div>
 
-        <!-- Obsidian-Style Knowledge Graph View -->
+        <!-- Interactive Knowledge Graph View -->
         <section id="graph-view" class="graph-view" aria-label="Knowledge Graph View" hidden>
           <canvas id="graph-canvas" class="graph-canvas"></canvas>
           <div class="graph-controls">
@@ -321,6 +321,7 @@
   <!-- Floating Text Selection Toolbar -->
   <div id="selection-toolbar" class="selection-toolbar" hidden role="toolbar" aria-label="Text formatting">
     <button id="btn-sel-bold" class="sel-btn" title="Bold (Ctrl+B)"><strong>B</strong></button>
+    <button id="btn-sel-italic" class="sel-btn" title="Italic (Ctrl+I)"><em>I</em></button>
     <button id="btn-sel-code" class="sel-btn" title="Inline Code (Ctrl+E)"><code>&lt;/&gt;</code></button>
     <button id="btn-sel-highlight" class="sel-btn" title="Highlight (==text==)"><mark class="inline-highlight">H</mark></button>
     <button id="btn-sel-color" class="sel-btn sel-btn-color" title="Text &amp; background color (Ctrl+Shift+H)">
@@ -383,6 +384,7 @@
   <!-- Toast Notification -->
   <div id="toast" class="toast" hidden role="status"></div>
 
+  <script src="vendor/prism.min.js" data-manual></script>
   <script type="module" src="app.js"></script>
 </body>
 </html>

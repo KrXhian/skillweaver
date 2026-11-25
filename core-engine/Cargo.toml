@@ -2,8 +2,9 @@
 name = "skillweaver"
 version = "0.1.0"
 edition = "2021"
-description = "Lightweight Notion + Obsidian markdown folder editor"
+description = "Lightweight local-first block-based Markdown editor and knowledge base"
 authors = ["Blue Frog Foundation"]
+license = "Apache-2.0"
 
 [lib]
 name = "skillweaver_lib"

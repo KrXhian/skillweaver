@@ -1,6 +1,7 @@
 pub mod ai;
 mod commands;
 pub mod markdown;
+pub mod mcp;
 pub mod prefs;
 pub mod terminal;
 pub mod vault;

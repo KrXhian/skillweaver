@@ -1,5 +1,5 @@
 /**
- * Interactive Obsidian-style force-directed knowledge graph rendered on HTML5 Canvas.
+ * Interactive force-directed knowledge graph rendered on HTML5 Canvas.
  */
 export class GraphView {
   constructor(elements, callbacks) {
@@ -413,7 +413,7 @@ export class GraphView {
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.clearRect(0, 0, this.width, this.height);
 
-    // Subtle Obsidian-style dot grid
+    // Subtle dot grid
     const gridSpacing = 36 * this.camera.zoom;
     if (gridSpacing >= 12) {
       const offsetX = ((this.width / 2 + this.camera.x * this.camera.zoom) % gridSpacing + gridSpacing) % gridSpacing;

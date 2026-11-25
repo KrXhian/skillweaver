@@ -114,7 +114,7 @@ export class AiPanel {
 
     this.includeCurrentPage = true;
     this.searchFolder = true;
-    this.pinnedAttachments = []; // { id, kind: "block"|"selection", label, blockId, obsidianId, text }
+    this.pinnedAttachments = []; // { id, kind: "block"|"selection", label, blockId, anchorId, text }
     this.liveSelectedBlocks = [];
     this.messages = []; // { id, role, content, createdAt?, error?, sourceFile?, finishReason?, proposalStates? }
     this.activeChatId = null;
@@ -663,7 +663,7 @@ export class AiPanel {
         kind: "block",
         label: `${block.type}: ${preview}`,
         blockId: block.id,
-        obsidianId: block.block_id || null,
+        anchorId: block.block_id || null,
         text: summarizeBlockPayload(block),
       });
     }
@@ -703,7 +703,7 @@ export class AiPanel {
       kind: "selection",
       label: `"${preview}${clean.length > 42 ? "…" : ""}"`,
       blockId: blockId || block?.id || "",
-      obsidianId: block?.block_id || null,
+      anchorId: block?.block_id || null,
       text: clean,
     });
     this.open();

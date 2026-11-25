@@ -1,3 +1,4 @@
+import { highlightCode } from "./highlight.js";
 import {
   buildPageLookup,
   domToInlineMarkdown,
@@ -73,8 +74,18 @@ const CODE_LANGUAGES = [
   "html",
   "css",
   "json",
+  "yaml",
+  "toml",
   "bash",
+  "powershell",
   "sql",
+  "go",
+  "c",
+  "cpp",
+  "java",
+  "csharp",
+  "docker",
+  "diff",
   "markdown",
 ];
 
@@ -83,6 +94,11 @@ const SLASH_ITEMS = [
   { id: "h1", label: "Heading 1", hint: "# Collapsible header" },
   { id: "h2", label: "Heading 2", hint: "## Collapsible header" },
   { id: "h3", label: "Heading 3", hint: "### Collapsible header" },
+  { id: "bullet_list", label: "Bullet List", hint: "- List item" },
+  { id: "numbered_list", label: "Numbered List", hint: "1. List item" },
+  { id: "todo", label: "To-do Checklist", hint: "- [ ] Task checkbox" },
+  { id: "quote", label: "Quote", hint: "> Blockquote" },
+  { id: "divider", label: "Divider", hint: "--- Horizontal rule" },
   { id: "code", label: "Code Block", hint: "``` Fenced code" },
   { id: "table", label: "Table", hint: "/table or | A | B |" },
 ];
@@ -342,7 +358,7 @@ function serializeTableFallbackText(block) {
   return rows.map((r) => (Array.isArray(r) ? r.join(" | ") : "")).join("\n");
 }
 
-function genObsidianBlockId(existingBlocks) {
+function genAnchorBlockId(existingBlocks) {
   const used = new Set(existingBlocks.map((b) => b.block_id).filter(Boolean));
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
   for (let attempt = 0; attempt < 32; attempt++) {
@@ -468,7 +484,7 @@ function extractInlineMdBeforeAndAfterCaret(editableEl) {
 }
 
 /**
- * Notion-style block editor with collapsible headings, bold/inline-code, code blocks, and @@ links.
+ * Block-based editor with collapsible headings, bold/inline-code, code blocks, and @@ links.
  */
 export class BlockEditor {
   constructor(
@@ -476,6 +492,7 @@ export class BlockEditor {
       containerEl,
       selectionToolbarEl,
       boldBtn,
+      italicBtn,
       inlineCodeBtn,
       highlightBtn,
       colorSelBtn,
@@ -672,6 +689,11 @@ export class BlockEditor {
       this.toggleInlineTag("STRONG");
     });
 
+    italicBtn?.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      this.toggleInlineTag("EM");
+    });
+
     inlineCodeBtn.addEventListener("mousedown", (e) => {
       e.preventDefault();
       this.toggleInlineTag("CODE");
@@ -850,7 +872,7 @@ export class BlockEditor {
       true
     );
 
-    // Notion-style Ctrl+Click / Shift+Click multi-block selection
+    // Ctrl+Click / Shift+Click multi-block selection
     this.containerEl.addEventListener(
       "mousedown",
       (e) => {
@@ -1141,11 +1163,17 @@ export class BlockEditor {
 
     this.containerEl.innerHTML = "";
     const frag = document.createDocumentFragment();
+    let numberedSeq = 0;
 
     for (let i = 0; i < this.blocks.length; i++) {
-      if (!visible[i]) continue;
       const block = this.blocks[i];
-      const row = this.createBlockRow(block, i, hiddenCounts[i], depths[i], lookup);
+      if (block.type === "numbered_list") {
+        numberedSeq += 1;
+      } else {
+        numberedSeq = 0;
+      }
+      if (!visible[i]) continue;
+      const row = this.createBlockRow(block, i, hiddenCounts[i], depths[i], lookup, numberedSeq);
       frag.appendChild(row);
     }
 
@@ -1182,6 +1210,9 @@ export class BlockEditor {
       }
     } else if (block.type === "image") {
       const card = row.querySelector(".block-image-card");
+      if (card) card.focus();
+    } else if (block.type === "divider") {
+      const card = row.querySelector(".block-divider-card");
       if (card) card.focus();
     } else if (block.type === "table") {
       const norm = normalizeTableData(block.rows, block.alignments, block.col_widths);
@@ -1226,7 +1257,7 @@ export class BlockEditor {
     }
   }
 
-  createBlockRow(block, idx, hiddenCount, depth, pageLookup) {
+  createBlockRow(block, idx, hiddenCount, depth, pageLookup, numberedIndex = 1) {
     const row = document.createElement("div");
     row.className = "block-row";
     row.dataset.id = block.id;
@@ -1236,6 +1267,17 @@ export class BlockEditor {
 
     if (block.type === "heading") {
       row.classList.add("block-heading", `block-heading-${Math.min(3, Math.max(1, block.level))}`);
+    } else if (block.type === "bullet_list") {
+      row.classList.add("block-bullet-list");
+    } else if (block.type === "numbered_list") {
+      row.classList.add("block-numbered-list");
+    } else if (block.type === "todo") {
+      row.classList.add("block-todo");
+      if (block.checked) row.classList.add("block-todo-checked");
+    } else if (block.type === "quote") {
+      row.classList.add("block-quote");
+    } else if (block.type === "divider") {
+      row.classList.add("block-divider");
     }
     if (isValidColorName(block.color)) {
       row.dataset.color = block.color;
@@ -1329,6 +1371,37 @@ export class BlockEditor {
       main.appendChild(this.createImageCard(block, idx));
     } else if (block.type === "table") {
       main.appendChild(this.createTableCard(block, idx, pageLookup));
+    } else if (block.type === "divider") {
+      const card = document.createElement("div");
+      card.className = "block-divider-card";
+      card.tabIndex = 0;
+      const hr = document.createElement("hr");
+      hr.className = "block-divider-line";
+      card.appendChild(hr);
+      card.addEventListener("keydown", (e) => {
+        const curIdx = this.blocks.findIndex((b) => b.id === block.id);
+        if (curIdx === -1) return;
+        if (e.key === "Backspace" || e.key === "Delete") {
+          e.preventDefault();
+          this.deleteBlock(curIdx);
+        } else if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          this.insertParagraphAfter(curIdx);
+        } else if (e.key === "ArrowUp") {
+          const prev = this.findPreviousVisibleBlock(curIdx);
+          if (prev) {
+            e.preventDefault();
+            this.focusBlock(prev.id, "end");
+          }
+        } else if (e.key === "ArrowDown") {
+          const next = this.findNextVisibleBlock(curIdx);
+          if (next) {
+            e.preventDefault();
+            this.focusBlock(next.id, "start");
+          }
+        }
+      });
+      main.appendChild(card);
     } else {
       if (block.type === "heading") {
         const isCollapsed = this.collapsedIds.has(block.id);
@@ -1341,6 +1414,33 @@ export class BlockEditor {
           this.toggleHeadingCollapse(block.id);
         });
         main.appendChild(toggleBtn);
+      } else if (block.type === "bullet_list") {
+        const marker = document.createElement("span");
+        marker.className = "block-list-marker block-bullet-marker";
+        marker.setAttribute("aria-hidden", "true");
+        marker.textContent = "•";
+        main.appendChild(marker);
+      } else if (block.type === "numbered_list") {
+        const marker = document.createElement("span");
+        marker.className = "block-list-marker block-number-marker";
+        marker.setAttribute("aria-hidden", "true");
+        marker.textContent = `${numberedIndex}.`;
+        main.appendChild(marker);
+      } else if (block.type === "todo") {
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.className = "block-todo-checkbox";
+        checkbox.checked = Boolean(block.checked);
+        checkbox.setAttribute("aria-label", "Toggle to-do");
+        checkbox.addEventListener("change", () => {
+          const curIdx = this.blocks.findIndex((b) => b.id === block.id);
+          if (curIdx === -1) return;
+          this.pushUndoSnapshot();
+          this.blocks[curIdx].checked = checkbox.checked;
+          row.classList.toggle("block-todo-checked", checkbox.checked);
+          this.onDirty();
+        });
+        main.appendChild(checkbox);
       }
 
       const editable = document.createElement("div");
@@ -1350,7 +1450,13 @@ export class BlockEditor {
       editable.dataset.placeholder =
         block.type === "heading"
           ? `Heading ${block.level}`
-          : "Type text, # for header, ``` for code, /table or | A | B |, @@ to link...";
+          : block.type === "bullet_list" || block.type === "numbered_list"
+            ? "List item"
+            : block.type === "todo"
+              ? "To-do"
+              : block.type === "quote"
+                ? "Quote"
+                : "Type text, # for header, - for list, / for blocks, @@ to link...";
       editable.innerHTML = inlineMarkdownToHtml(block.content, pageLookup);
 
       this.attachEditableHandlers(editable, block.id);
@@ -1398,6 +1504,7 @@ export class BlockEditor {
       if (!b) return;
       this.pushUndoSnapshot();
       b.language = select.value === "text" ? "" : select.value;
+      syncHighlight();
       this.onDirty();
     });
 
@@ -1421,17 +1528,28 @@ export class BlockEditor {
     header.appendChild(copyBtn);
     card.appendChild(header);
 
+    const wrap = document.createElement("div");
+    wrap.className = "code-editor-wrap";
+
+    const pre = document.createElement("pre");
+    pre.className = "code-highlight";
+    pre.setAttribute("aria-hidden", "true");
+    const codeEl = document.createElement("code");
+    pre.appendChild(codeEl);
+
     const ta = document.createElement("textarea");
     ta.className = "code-textarea";
     ta.spellcheck = false;
     ta.placeholder = "Write code...";
     ta.value = block.content || "";
 
-    const autoResize = () => {
-      ta.style.height = "auto";
-      ta.style.height = `${Math.max(48, ta.scrollHeight)}px`;
+    const syncHighlight = () => {
+      const lang = select.value === "text" ? "" : select.value;
+      const raw = ta.value;
+      const html = highlightCode(raw, lang);
+      codeEl.innerHTML = raw.endsWith("\n") ? `${html} ` : (html || " ");
     };
-    requestAnimationFrame(autoResize);
+    syncHighlight();
 
     let typedSinceSnap = false;
     ta.addEventListener("input", () => {
@@ -1441,7 +1559,7 @@ export class BlockEditor {
       }
       const b = this.blocks.find((x) => x.id === block.id);
       if (b) b.content = ta.value;
-      autoResize();
+      syncHighlight();
       this.onDirty();
     });
 
@@ -1458,7 +1576,7 @@ export class BlockEditor {
         ta.setSelectionRange(start + 2, start + 2);
         const b = this.blocks.find((x) => x.id === block.id);
         if (b) b.content = ta.value;
-        autoResize();
+        syncHighlight();
         this.onDirty();
         return;
       }
@@ -1506,7 +1624,9 @@ export class BlockEditor {
       }
     });
 
-    card.appendChild(ta);
+    wrap.appendChild(pre);
+    wrap.appendChild(ta);
+    card.appendChild(wrap);
     return card;
   }
 
@@ -2920,6 +3040,75 @@ export class BlockEditor {
           return;
         }
 
+        // Divider trigger: --- / *** / ___ + space
+        if (/^(?:---|[*]{3}|___)[\u00A0 ]$/.test(rawMd)) {
+          this.blocks[idx] = { id: block.id, type: "divider" };
+          let focusId = block.id;
+          if (idx === this.blocks.length - 1) {
+            const np = { id: genBlockId(), type: "paragraph", content: "" };
+            this.blocks.push(np);
+            focusId = np.id;
+          } else {
+            focusId = this.blocks[idx + 1].id;
+          }
+          this.render(focusId, "start");
+          this.onDirty();
+          return;
+        }
+
+        // To-do checklist trigger: - [ ] , - [x] , [] + space
+        const todoMatch = rawMd.match(/^(?:[-*+][\u00A0 ]*\[([ xX])\]|\[\])[\u00A0 ]([\s\S]*)$/);
+        if (todoMatch) {
+          this.blocks[idx] = {
+            id: block.id,
+            type: "todo",
+            checked: /[xX]/.test(todoMatch[1] || ""),
+            content: todoMatch[2] || "",
+          };
+          this.render(block.id, "start");
+          this.onDirty();
+          return;
+        }
+
+        // Bullet list trigger: - , * , + + space
+        const bulletMatch = rawMd.match(/^([-*+])[\u00A0 ]([\s\S]*)$/);
+        if (bulletMatch) {
+          this.blocks[idx] = {
+            id: block.id,
+            type: "bullet_list",
+            content: bulletMatch[2] || "",
+          };
+          this.render(block.id, "start");
+          this.onDirty();
+          return;
+        }
+
+        // Numbered list trigger: 1. + space
+        const numMatch = rawMd.match(/^(\d+)\.[\u00A0 ]([\s\S]*)$/);
+        if (numMatch) {
+          this.blocks[idx] = {
+            id: block.id,
+            type: "numbered_list",
+            content: numMatch[2] || "",
+          };
+          this.render(block.id, "start");
+          this.onDirty();
+          return;
+        }
+
+        // Quote trigger: > + space
+        const quoteMatch = rawMd.match(/^>[\u00A0 ]([\s\S]*)$/);
+        if (quoteMatch) {
+          this.blocks[idx] = {
+            id: block.id,
+            type: "quote",
+            content: quoteMatch[1] || "",
+          };
+          this.render(block.id, "start");
+          this.onDirty();
+          return;
+        }
+
         // Slash menu trigger: /...
         const slashMatch = rawMd.match(/^\/([^\n]*)$/);
         if (slashMatch) {
@@ -2951,6 +3140,13 @@ export class BlockEditor {
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === "b") {
         e.preventDefault();
         this.toggleInlineTag("STRONG");
+        return;
+      }
+
+      // Ctrl+I -> Italic
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === "i") {
+        e.preventDefault();
+        this.toggleInlineTag("EM");
         return;
       }
 
@@ -3002,7 +3198,7 @@ export class BlockEditor {
         e.preventDefault();
         const currentMd = domToInlineMarkdown(editable);
 
-        // ``` or ```lang + Enter -> Code block, or Markdown table autogeneration
+        // ``` or ```lang + Enter -> Code block, --- -> Divider, or Markdown table autogeneration
         if (block.type === "paragraph") {
           const codeEnter = currentMd.match(/^```([a-zA-Z0-9_+-]*)$/);
           if (codeEnter) {
@@ -3014,6 +3210,16 @@ export class BlockEditor {
               content: "",
             };
             this.render(block.id, "start");
+            this.onDirty();
+            return;
+          }
+
+          if (/^(?:---|[*]{3}|___)$/.test(currentMd.trim())) {
+            this.pushUndoSnapshot();
+            this.blocks[idx] = { id: block.id, type: "divider" };
+            const np = { id: genBlockId(), type: "paragraph", content: "" };
+            this.blocks.splice(idx + 1, 0, np);
+            this.render(np.id, "start");
             this.onDirty();
             return;
           }
@@ -3070,10 +3276,43 @@ export class BlockEditor {
           }
         }
         this.pushUndoSnapshot();
+        if (
+          (block.type === "bullet_list" ||
+            block.type === "numbered_list" ||
+            block.type === "todo" ||
+            block.type === "quote") &&
+          before.trim() === "" &&
+          after.trim() === ""
+        ) {
+          const styleBase = {};
+          if (isValidColorName(block.color)) styleBase.color = block.color;
+          if (isValidColorName(block.bg)) styleBase.bg = block.bg;
+          if (block.outdent > 0) styleBase.outdent = block.outdent;
+          this.blocks[idx] = { id: block.id, ...styleBase, type: "paragraph", content: "" };
+          this.render(block.id, "start");
+          this.onDirty();
+          return;
+        }
         this.blocks[idx].content = before;
-        const newPara = { id: genBlockId(), type: "paragraph", content: after };
-        this.blocks.splice(idx + 1, 0, newPara);
-        this.render(newPara.id, "start");
+        let nextBlock;
+        if (block.type === "bullet_list" || block.type === "numbered_list" || block.type === "todo") {
+          nextBlock = {
+            id: genBlockId(),
+            type: block.type,
+            ...(block.type === "todo" ? { checked: false } : {}),
+            ...(block.outdent > 0 ? { outdent: block.outdent } : {}),
+            content: after,
+          };
+        } else {
+          nextBlock = {
+            id: genBlockId(),
+            type: "paragraph",
+            ...(block.outdent > 0 ? { outdent: block.outdent } : {}),
+            content: after,
+          };
+        }
+        this.blocks.splice(idx + 1, 0, nextBlock);
+        this.render(nextBlock.id, "start");
         this.onDirty();
         return;
       }
@@ -3111,7 +3350,13 @@ export class BlockEditor {
 
         const offset = getCaretOffsetInText(editable);
         if (offset === 0 && sel?.isCollapsed) {
-          if (block.type === "heading") {
+          if (
+            block.type === "heading" ||
+            block.type === "bullet_list" ||
+            block.type === "numbered_list" ||
+            block.type === "todo" ||
+            block.type === "quote"
+          ) {
             e.preventDefault();
             this.pushUndoSnapshot();
             this.collapsedIds.delete(block.id);
@@ -3122,6 +3367,7 @@ export class BlockEditor {
             };
             if (isValidColorName(block.color)) nextPara.color = block.color;
             if (isValidColorName(block.bg)) nextPara.bg = block.bg;
+            if (block.type !== "heading" && block.outdent > 0) nextPara.outdent = block.outdent;
             this.blocks[idx] = nextPara;
             this.render(block.id, "start");
             this.onDirty();
@@ -3145,7 +3391,12 @@ export class BlockEditor {
           const prev = this.findPreviousVisibleBlock(idx);
           if (prev) {
             e.preventDefault();
-            if (prev.type === "code" || prev.type === "image" || prev.type === "table") {
+            if (
+              prev.type === "code" ||
+              prev.type === "image" ||
+              prev.type === "table" ||
+              prev.type === "divider"
+            ) {
               if (domToInlineMarkdown(editable) === "" && this.blocks.length > 1) {
                 this.pushUndoSnapshot();
                 this.blocks.splice(idx, 1);
@@ -3254,16 +3505,18 @@ export class BlockEditor {
 
     this.pushUndoSnapshot();
 
+    const matchSelector =
+      tagName === "EM" ? "em, i" : tagName === "STRONG" ? "strong, b" : tagName;
     const startAncestor = (
       range.startContainer.nodeType === Node.ELEMENT_NODE
         ? range.startContainer
         : range.startContainer.parentElement
-    )?.closest(tagName);
+    )?.closest(matchSelector);
     const endAncestor = (
       range.endContainer.nodeType === Node.ELEMENT_NODE
         ? range.endContainer
         : range.endContainer.parentElement
-    )?.closest(tagName);
+    )?.closest(matchSelector);
 
     if (startAncestor && startAncestor === endAncestor && editable.contains(startAncestor)) {
       // Unwrap formatting tag
@@ -3347,7 +3600,7 @@ export class BlockEditor {
     }
   }
 
-  /* Notion-Style Color System (Blocks & Inline Text) */
+  /* Block Color System (Blocks & Inline Text) */
   recordLastUsedColor(kind, value) {
     if (!isValidColorName(value)) return;
     this.lastUsedColor = { kind, value };
@@ -3779,6 +4032,23 @@ export class BlockEditor {
         level: Number(item.id.slice(1)),
         content: "",
       };
+    } else if (item.id === "bullet_list" || item.id === "numbered_list" || item.id === "quote") {
+      this.blocks[blockIdx] = { id: blockId, type: item.id, content: "" };
+    } else if (item.id === "todo") {
+      this.blocks[blockIdx] = { id: blockId, type: "todo", checked: false, content: "" };
+    } else if (item.id === "divider") {
+      this.blocks[blockIdx] = { id: blockId, type: "divider" };
+      let focusId = blockId;
+      if (blockIdx === this.blocks.length - 1) {
+        const np = { id: genBlockId(), type: "paragraph", content: "" };
+        this.blocks.push(np);
+        focusId = np.id;
+      } else {
+        focusId = this.blocks[blockIdx + 1].id;
+      }
+      this.render(focusId, "start");
+      this.onDirty();
+      return;
     } else if (item.id === "code") {
       this.blocks[blockIdx] = { id: blockId, type: "code", language: "", content: "" };
     } else if (item.id === "table") {
@@ -4271,6 +4541,11 @@ export class BlockEditor {
         { label: "Heading 1", run: () => this.turnBlockInto(idx, "heading", 1) },
         { label: "Heading 2", run: () => this.turnBlockInto(idx, "heading", 2) },
         { label: "Heading 3", run: () => this.turnBlockInto(idx, "heading", 3) },
+        { label: "Bullet List", run: () => this.turnBlockInto(idx, "bullet_list") },
+        { label: "Numbered List", run: () => this.turnBlockInto(idx, "numbered_list") },
+        { label: "To-do List", run: () => this.turnBlockInto(idx, "todo") },
+        { label: "Quote", run: () => this.turnBlockInto(idx, "quote") },
+        { label: "Divider", run: () => this.turnBlockInto(idx, "divider") },
         { label: "Code Block", run: () => this.turnBlockInto(idx, "code") },
         { label: "Table", run: () => this.turnBlockInto(idx, "table") },
         { divider: true }
@@ -4363,7 +4638,7 @@ export class BlockEditor {
     const block = this.blocks[idx];
     if (!block) return null;
     if (block.block_id) return block.block_id;
-    const bid = genObsidianBlockId(this.blocks);
+    const bid = genAnchorBlockId(this.blocks);
     block.block_id = bid;
     this.onDirty();
     return bid;
@@ -4463,16 +4738,16 @@ export class BlockEditor {
     return false;
   }
 
-  findBlockIndexByAnyId(idOrObsidianId) {
-    if (!idOrObsidianId) return -1;
-    const clean = String(idOrObsidianId).trim();
+  findBlockIndexByAnyId(idOrAnchorId) {
+    if (!idOrAnchorId) return -1;
+    const clean = String(idOrAnchorId).trim();
     const stripped = clean.startsWith("^") ? clean.slice(1) : clean;
     return this.blocks.findIndex((b) => b.id === clean || b.block_id === stripped);
   }
 
-  normalizeAiBlockPayload(raw, preserveId = null, preserveObsidianId = null, preserveStyle = null) {
+  normalizeAiBlockPayload(raw, preserveId = null, preserveAnchorId = null, preserveStyle = null) {
     const id = preserveId || genBlockId();
-    const base = preserveObsidianId ? { block_id: preserveObsidianId } : {};
+    const base = preserveAnchorId ? { block_id: preserveAnchorId } : {};
     const color = isValidColorName(raw?.color)
       ? raw.color
       : isValidColorName(preserveStyle?.color)
@@ -4503,7 +4778,45 @@ export class BlockEditor {
         ...base,
         type: "heading",
         level: Math.min(3, Math.max(1, Number(raw.level) || 1)),
-        content: String(raw.content || ""),
+        content: replaceBrOutsideCode(String(raw.content || ""))
+          .replace(/\s*\n\s*/g, " ")
+          .trim(),
+      };
+    }
+    if (type === "bullet_list" || type === "numbered_list") {
+      return {
+        id,
+        ...base,
+        type,
+        content: replaceBrOutsideCode(String(raw.content || ""))
+          .replace(/\s*\n\s*/g, " ")
+          .trim(),
+      };
+    }
+    if (type === "todo") {
+      return {
+        id,
+        ...base,
+        type: "todo",
+        checked: Boolean(raw.checked),
+        content: replaceBrOutsideCode(String(raw.content || ""))
+          .replace(/\s*\n\s*/g, " ")
+          .trim(),
+      };
+    }
+    if (type === "quote") {
+      return {
+        id,
+        ...base,
+        type: "quote",
+        content: replaceBrOutsideCode(String(raw.content || "")),
+      };
+    }
+    if (type === "divider") {
+      return {
+        id,
+        ...base,
+        type: "divider",
       };
     }
     if (type === "code") {
@@ -4520,6 +4833,9 @@ export class BlockEditor {
       if (Array.isArray(raw.headers) && raw.headers.length) {
         rawRows = [raw.headers, ...rawRows];
       }
+      rawRows = rawRows.map((row) =>
+        Array.isArray(row) ? row.map((cell) => replaceBrOutsideCode(String(cell ?? ""))) : []
+      );
       const norm = normalizeTableData(rawRows, raw.alignments, raw.col_widths);
       return {
         id,
@@ -4534,7 +4850,7 @@ export class BlockEditor {
       id,
       ...base,
       type: "paragraph",
-      content: String(raw?.content || ""),
+      content: replaceBrOutsideCode(String(raw?.content || "")),
     };
   }
 
@@ -4545,9 +4861,9 @@ export class BlockEditor {
     this.syncAllEditableFromDom();
 
     const sim = this.blocks.map((b) => ({ id: b.id, block_id: b.block_id || null }));
-    const findSimIdx = (idOrObsidianId) => {
-      if (!idOrObsidianId) return -1;
-      const clean = String(idOrObsidianId).trim();
+    const findSimIdx = (idOrAnchorId) => {
+      if (!idOrAnchorId) return -1;
+      const clean = String(idOrAnchorId).trim();
       const stripped = clean.startsWith("^") ? clean.slice(1) : clean;
       return sim.findIndex((b) => b.id === clean || b.block_id === stripped);
     };
@@ -4699,6 +5015,18 @@ export class BlockEditor {
       this.blocks[idx] = { id: old.id, ...styleBase, type: "paragraph", content: fallbackText };
     } else if (type === "heading") {
       this.blocks[idx] = { id: old.id, ...styleBase, type: "heading", level, content: fallbackText };
+    } else if (type === "bullet_list" || type === "numbered_list" || type === "quote") {
+      this.blocks[idx] = { id: old.id, ...styleBase, type, content: fallbackText };
+    } else if (type === "todo") {
+      this.blocks[idx] = {
+        id: old.id,
+        ...styleBase,
+        type: "todo",
+        checked: Boolean(old.checked),
+        content: fallbackText,
+      };
+    } else if (type === "divider") {
+      this.blocks[idx] = { id: old.id, ...styleBase, type: "divider" };
     } else if (type === "code") {
       this.blocks[idx] = {
         id: old.id,

@@ -1113,6 +1113,11 @@ fn block_ref_id(block: &Block) -> Option<&str> {
     match block {
         Block::Heading { block_id, .. }
         | Block::Paragraph { block_id, .. }
+        | Block::BulletList { block_id, .. }
+        | Block::NumberedList { block_id, .. }
+        | Block::Todo { block_id, .. }
+        | Block::Quote { block_id, .. }
+        | Block::Divider { block_id, .. }
         | Block::Code { block_id, .. }
         | Block::Image { block_id, .. }
         | Block::Table { block_id, .. } => block_id.as_deref(),

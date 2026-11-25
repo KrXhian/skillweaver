@@ -4,7 +4,7 @@
  * <span data-color/bg="..."> inline colors, [[wikilinks]], and [label](target.md).
  */
 
-export const NOTION_COLORS = [
+export const BLOCK_COLORS = [
   "gray",
   "brown",
   "orange",
@@ -16,7 +16,7 @@ export const NOTION_COLORS = [
   "red",
 ];
 
-const VALID_COLOR_SET = new Set(NOTION_COLORS);
+const VALID_COLOR_SET = new Set(BLOCK_COLORS);
 
 export function isValidColorName(name) {
   return typeof name === "string" && VALID_COLOR_SET.has(name);
@@ -113,7 +113,7 @@ function renderLinkHtml(target, label, pageLookup) {
   return `<span class="${cls}" contenteditable="false" data-target="${escapeHtml(target)}"${labelAttr}>${display}</span>`;
 }
 
-function tokenizeInline(text, pageLookup, insideBold = false) {
+function tokenizeInline(text, pageLookup, insideBold = false, insideItalic = false) {
   let out = "";
   let i = 0;
 
@@ -140,7 +140,7 @@ function tokenizeInline(text, pageLookup, insideBold = false) {
       }
     }
 
-    // Obsidian wikilink: [[target]] or [[target|label]]
+    // Wikilink: [[target]] or [[target|label]]
     if (ch === "[" && text[i + 1] === "[") {
       const close = text.indexOf("]]", i + 2);
       if (close !== -1) {
@@ -192,7 +192,7 @@ function tokenizeInline(text, pageLookup, insideBold = false) {
       if (close > i + 2) {
         const inner = text.slice(i + 2, close);
         if (!inner.includes("\n")) {
-          out += `<mark class="inline-highlight">${tokenizeInline(inner, pageLookup, insideBold)}</mark>`;
+          out += `<mark class="inline-highlight">${tokenizeInline(inner, pageLookup, insideBold, insideItalic)}</mark>`;
           i = close + 2;
           continue;
         }
@@ -205,8 +205,35 @@ function tokenizeInline(text, pageLookup, insideBold = false) {
       if (close > i + 2) {
         const inner = text.slice(i + 2, close);
         if (!inner.includes("\n")) {
-          out += `<strong>${tokenizeInline(inner, pageLookup, true)}</strong>`;
+          out += `<strong>${tokenizeInline(inner, pageLookup, true, insideItalic)}</strong>`;
           i = close + 2;
+          continue;
+        }
+      }
+    }
+
+    // Italic: *...*
+    if (!insideItalic && ch === "*" && text[i + 1] !== "*" && i + 1 < text.length) {
+      const nextCh = text[i + 1];
+      if (nextCh !== " " && nextCh !== "\t" && nextCh !== "\n") {
+        let j = i + 1;
+        let closeIdx = -1;
+        while (j < text.length && text[j] !== "\n") {
+          if (text[j] === "*") {
+            const prevCh = text[j - 1];
+            const afterCh = text[j + 1];
+            const isClosingTripleInsideBold = insideBold && afterCh === "*" && text[j + 2] !== "*";
+            if (prevCh !== " " && prevCh !== "\t" && (afterCh !== "*" || isClosingTripleInsideBold)) {
+              closeIdx = j;
+              break;
+            }
+          }
+          j += 1;
+        }
+        if (closeIdx > i + 1) {
+          const inner = text.slice(i + 1, closeIdx);
+          out += `<em>${tokenizeInline(inner, pageLookup, insideBold, true)}</em>`;
+          i = closeIdx + 1;
           continue;
         }
       }
@@ -233,7 +260,7 @@ function tokenizeInline(text, pageLookup, insideBold = false) {
             const cls = `sw-inline-color${c ? ` sw-color-${c}` : ""}${bg ? ` sw-bg-${bg}` : ""}`;
             const cAttr = c ? ` data-color="${c}"` : "";
             const bgAttr = bg ? ` data-bg="${bg}"` : "";
-            out += `<span class="${cls}"${cAttr}${bgAttr}>${tokenizeInline(inner, pageLookup, insideBold)}</span>`;
+            out += `<span class="${cls}"${cAttr}${bgAttr}>${tokenizeInline(inner, pageLookup, insideBold, insideItalic)}</span>`;
             i = closeIdx + 7;
             continue;
           }
@@ -253,10 +280,10 @@ function tokenizeInline(text, pageLookup, insideBold = false) {
  */
 export function inlineMarkdownToHtml(md, pageLookup) {
   if (!md) return "";
-  return tokenizeInline(md, pageLookup, false);
+  return tokenizeInline(md, pageLookup, false, false);
 }
 
-function serializeChildNodes(parent, insideBold = false) {
+function serializeChildNodes(parent, insideBold = false, insideItalic = false) {
   let out = "";
   const children = Array.from(parent.childNodes);
 
@@ -284,7 +311,7 @@ function serializeChildNodes(parent, insideBold = false) {
     }
 
     if (node.classList.contains("sw-inline-color")) {
-      const inner = serializeChildNodes(node, insideBold);
+      const inner = serializeChildNodes(node, insideBold, insideItalic);
       if (inner.length === 0) continue;
       const c = isValidColorName(node.dataset.color) ? node.dataset.color : "";
       const bg = isValidColorName(node.dataset.bg) ? node.dataset.bg : "";
@@ -322,14 +349,14 @@ function serializeChildNodes(parent, insideBold = false) {
     }
 
     if (tag === "MARK") {
-      const inner = serializeChildNodes(node, insideBold);
+      const inner = serializeChildNodes(node, insideBold, insideItalic);
       if (inner.length === 0) continue;
       out += `==${inner}==`;
       continue;
     }
 
     if (tag === "STRONG" || tag === "B") {
-      const inner = serializeChildNodes(node, true);
+      const inner = serializeChildNodes(node, true, insideItalic);
       if (inner.length === 0) continue;
       if (insideBold) {
         out += inner;
@@ -339,8 +366,19 @@ function serializeChildNodes(parent, insideBold = false) {
       continue;
     }
 
+    if (tag === "EM" || tag === "I") {
+      const inner = serializeChildNodes(node, insideBold, true);
+      if (inner.length === 0) continue;
+      if (insideItalic) {
+        out += inner;
+      } else {
+        out += `*${inner}*`;
+      }
+      continue;
+    }
+
     if (tag === "DIV" || tag === "P") {
-      const inner = serializeChildNodes(node, insideBold);
+      const inner = serializeChildNodes(node, insideBold, insideItalic);
       if (out.length > 0 && !out.endsWith("\n")) {
         out += "\n";
       }
@@ -348,7 +386,7 @@ function serializeChildNodes(parent, insideBold = false) {
       continue;
     }
 
-    out += serializeChildNodes(node, insideBold);
+    out += serializeChildNodes(node, insideBold, insideItalic);
   }
 
   return out;
@@ -358,7 +396,7 @@ function serializeChildNodes(parent, insideBold = false) {
  * Serializes a contenteditable block DOM back to inline Markdown.
  */
 export function domToInlineMarkdown(el) {
-  return serializeChildNodes(el, false).replace(/\u200B/g, "");
+  return serializeChildNodes(el, false, false).replace(/\u200B/g, "");
 }
 
 /**
@@ -459,6 +497,36 @@ export function tryAutoFormatInline(el) {
         parent.insertBefore(document.createTextNode(prefix), textNode);
       }
       parent.insertBefore(markEl, textNode);
+      const trailing = document.createTextNode(after.length > 0 ? after : "\u200B");
+      parent.insertBefore(trailing, textNode);
+      parent.removeChild(textNode);
+
+      const nextRange = document.createRange();
+      nextRange.setStart(trailing, after.length > 0 ? 0 : 1);
+      nextRange.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(nextRange);
+      return true;
+    }
+  }
+
+  // Match newly closed *italic* (skip if already inside <em> or **)
+  if (!textNode.parentElement?.closest("em, i")) {
+    const emMatch = before.match(/(^|[^*])\*([^*\s\n](?:[^*\n]*[^*\s\n])?)\*$/);
+    if (emMatch) {
+      const inside = emMatch[2];
+      const lead = emMatch[1] || "";
+      const startIdx = before.length - emMatch[0].length + lead.length;
+      const prefix = before.slice(0, startIdx);
+
+      const emEl = document.createElement("em");
+      emEl.textContent = inside;
+
+      const parent = textNode.parentNode;
+      if (prefix) {
+        parent.insertBefore(document.createTextNode(prefix), textNode);
+      }
+      parent.insertBefore(emEl, textNode);
       const trailing = document.createTextNode(after.length > 0 ? after : "\u200B");
       parent.insertBefore(trailing, textNode);
       parent.removeChild(textNode);
