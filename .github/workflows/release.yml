@@ -38,6 +38,15 @@ jobs:
           $hash = (Get-FileHash "dist/skillweaver-windows-x64.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  skillweaver-windows-x64.exe" | Set-Content -Path "dist/SHA256SUMS.txt" -Encoding ASCII
 
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: skillweaver-windows-x64
+          path: |
+            dist/skillweaver-windows-x64.exe
+            dist/SHA256SUMS.txt
+          retention-days: 30
+
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
