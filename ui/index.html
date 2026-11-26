@@ -109,6 +109,19 @@
       </header>
 
       <div class="workspace-body">
+        <!-- External Disk Conflict Banner -->
+        <div id="external-conflict-banner" class="conflict-banner" role="alert" hidden>
+          <div class="conflict-banner-info">
+            <span class="conflict-banner-dot" aria-hidden="true"></span>
+            <span id="conflict-banner-text" class="conflict-banner-text"></span>
+          </div>
+          <div class="conflict-banner-actions">
+            <button id="btn-conflict-diff" class="conflict-btn" type="button">View Diff</button>
+            <button id="btn-conflict-keep" class="conflict-btn" type="button">Keep Mine</button>
+            <button id="btn-conflict-reload" class="conflict-btn conflict-btn-primary" type="button">Reload</button>
+          </div>
+        </div>
+
         <!-- Welcome / Empty View -->
         <section id="welcome-view" class="welcome-view">
           <div class="welcome-card">
@@ -215,7 +228,7 @@
           <div id="terminal-output" class="terminal-output"></div>
           <div class="terminal-prompt-row">
             <span id="terminal-prompt-prefix" class="terminal-prompt-prefix">PS &gt;</span>
-            <input id="terminal-input" class="terminal-input" type="text" spellcheck="false" autocomplete="off" placeholder="Type a command..." />
+            <input id="terminal-input" class="terminal-input" type="text" spellcheck="false" autocomplete="off" />
           </div>
         </div>
       </section>
@@ -377,6 +390,36 @@
       <div class="input-modal-actions">
         <button id="input-modal-cancel" class="secondary-btn">Cancel</button>
         <button id="input-modal-confirm" class="primary-btn">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Disk Conflict Diff Modal -->
+  <div id="diff-modal" class="modal-backdrop diff-modal-backdrop" hidden>
+    <div class="modal-panel diff-modal-panel" role="dialog" aria-modal="true" aria-labelledby="diff-modal-title">
+      <div class="diff-modal-header">
+        <div class="diff-modal-heading">
+          <h2 id="diff-modal-title" class="diff-modal-title">External Changes on Disk</h2>
+          <span id="diff-modal-subtitle" class="diff-modal-subtitle"></span>
+        </div>
+        <div class="diff-modal-header-right">
+          <span id="diff-modal-stats" class="diff-modal-stats"></span>
+          <button id="diff-modal-close" class="icon-btn" type="button" title="Close (Esc)" aria-label="Close Diff">
+            <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M4 4l8 8M12 4l-8 8"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+      <div class="diff-modal-legend">
+        <span class="diff-legend-item diff-legend-del">− Only in your unsaved buffer</span>
+        <span class="diff-legend-item diff-legend-add">+ On disk</span>
+      </div>
+      <div id="diff-modal-body" class="diff-modal-body"></div>
+      <div class="diff-modal-footer">
+        <button id="diff-btn-cancel" class="secondary-btn" type="button">Close</button>
+        <button id="diff-btn-keep" class="secondary-btn" type="button">Keep Mine</button>
+        <button id="diff-btn-reload" class="primary-btn" type="button">Reload from Disk</button>
       </div>
     </div>
   </div>

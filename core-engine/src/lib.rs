@@ -5,6 +5,7 @@ pub mod mcp;
 pub mod prefs;
 pub mod terminal;
 pub mod vault;
+pub mod watcher;
 
 use commands::AppState;
 use std::sync::Mutex;
@@ -27,12 +28,14 @@ pub fn run() {
         })
         .manage(terminal::TerminalState::default())
         .manage(ai::AiState::default())
+        .manage(watcher::VaultWatcherState::default())
         .invoke_handler(tauri::generate_handler![
             commands::get_startup_state,
             commands::pick_folder,
             commands::open_folder,
             commands::refresh_vault,
             commands::open_note,
+            commands::check_note_on_disk,
             commands::save_note_blocks,
             commands::save_note_raw,
             commands::parse_raw_markdown,

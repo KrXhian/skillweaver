@@ -415,8 +415,8 @@ function getTotalTextLength(root) {
   return (root.textContent || "").replace(/\u200B/g, "").length;
 }
 
-function setCaretAtEdge(el, atEnd) {
-  el.focus();
+function setCaretAtEdge(el, atEnd, preventScroll = false) {
+  el.focus(preventScroll ? { preventScroll: true } : undefined);
   const sel = window.getSelection();
   const range = document.createRange();
   range.selectNodeContents(el);
@@ -425,8 +425,8 @@ function setCaretAtEdge(el, atEnd) {
   sel.addRange(range);
 }
 
-function setCaretAtCharOffset(root, targetOffset) {
-  root.focus();
+function setCaretAtCharOffset(root, targetOffset, preventScroll = false) {
+  root.focus(preventScroll ? { preventScroll: true } : undefined);
   const sel = window.getSelection();
   const range = document.createRange();
   let remaining = Math.max(0, targetOffset);
@@ -946,6 +946,202 @@ export class BlockEditor {
     this.linkAutocomplete.close();
     this.hideSelectionToolbar();
     this.render();
+  }
+
+  isInteracting() {
+    return Boolean(
+      this.pointerDrag?.started ||
+        this.marquee?.active ||
+        this.tableResizeDrag ||
+        this.tableColResize
+    );
+  }
+
+  captureViewState() {
+    this.syncAllEditableFromDom();
+    const scrollEl = this.containerEl.closest(".editor-scroll");
+    const scrollTop = scrollEl ? scrollEl.scrollTop : 0;
+
+    const occByKey = new Map();
+    const collapsedHeadings = [];
+    for (let i = 0; i < this.blocks.length; i++) {
+      const b = this.blocks[i];
+      if (b.type !== "heading") continue;
+      const key = `${b.level}::${(b.content || "").trim()}`;
+      const occ = occByKey.get(key) || 0;
+      occByKey.set(key, occ + 1);
+      if (this.collapsedIds.has(b.id)) {
+        collapsedHeadings.push({ key, occ, idx: i, level: b.level });
+      }
+    }
+
+    let focus = null;
+    const active = document.activeElement;
+    const row = active?.closest?.(".block-row");
+    if (row && this.containerEl.contains(row)) {
+      const blockIdx = this.blocks.findIndex((b) => b.id === row.dataset.id);
+      if (blockIdx !== -1) {
+        const block = this.blocks[blockIdx];
+        const base = {
+          blockIdx,
+          anchorId: block.block_id || null,
+          type: block.type,
+          content: block.content || "",
+        };
+        if (active.classList.contains("block-editable")) {
+          focus = { ...base, kind: "editable", charOffset: getCaretOffsetInText(active) };
+        } else if (active.classList.contains("code-textarea")) {
+          focus = {
+            ...base,
+            kind: "code",
+            selectionStart: active.selectionStart ?? 0,
+            selectionEnd: active.selectionEnd ?? 0,
+          };
+        } else if (active.classList.contains("table-cell-editable")) {
+          focus = {
+            ...base,
+            kind: "table",
+            row: Number(active.dataset.row) || 0,
+            col: Number(active.dataset.col) || 0,
+            charOffset: getCaretOffsetInText(active),
+          };
+        } else {
+          focus = { ...base, kind: "card" };
+        }
+      }
+    }
+
+    return { scrollTop, collapsedHeadings, focus };
+  }
+
+  hotReloadDocument(blocks, viewState = null) {
+    this.syncAllEditableFromDom();
+    this.pushUndoSnapshot();
+
+    this.blocks = blocks?.length
+      ? cloneBlocks(blocks)
+      : [{ id: genBlockId(), type: "paragraph", content: "" }];
+
+    this.collapsedIds = new Set();
+    this.selectedBlockIds.clear();
+    this.lastSelectedBlockId = null;
+    this.menuTargetBlockId = null;
+    this.containerEl.classList.remove("has-block-selection");
+    this.cleanupMarquee();
+    this.suppressNextBottomClick = false;
+    this.notifyBlockSelectionChange();
+    this.updateBlockSelectionBar();
+
+    if (viewState?.collapsedHeadings?.length) {
+      const headingsByKeyOcc = new Map();
+      const occByKey = new Map();
+      for (let i = 0; i < this.blocks.length; i++) {
+        const b = this.blocks[i];
+        if (b.type !== "heading") continue;
+        const key = `${b.level}::${(b.content || "").trim()}`;
+        const occ = occByKey.get(key) || 0;
+        occByKey.set(key, occ + 1);
+        headingsByKeyOcc.set(`${key}#${occ}`, b.id);
+      }
+
+      for (const ch of viewState.collapsedHeadings) {
+        const byKey = headingsByKeyOcc.get(`${ch.key}#${ch.occ}`);
+        if (byKey) {
+          this.collapsedIds.add(byKey);
+          continue;
+        }
+        const byIdx = this.blocks[ch.idx];
+        if (byIdx && byIdx.type === "heading" && byIdx.level === ch.level) {
+          this.collapsedIds.add(byIdx.id);
+        }
+      }
+    }
+
+    this.cleanupPointerDrag();
+    this.cleanupTableResizeDrag();
+    this.cleanupTableColResize(false);
+    this.closeSlashMenu();
+    this.closeBlockMenu();
+    this.closeTableMenu();
+    this.closeColorPopover();
+    this.linkAutocomplete.close();
+    this.hideSelectionToolbar();
+    this.render();
+
+    const scrollEl = this.containerEl.closest(".editor-scroll");
+    const targetScrollTop = typeof viewState?.scrollTop === "number" ? viewState.scrollTop : null;
+
+    if (viewState?.focus && this.blocks.length) {
+      const f = viewState.focus;
+      let target = null;
+
+      if (f.anchorId) {
+        target = this.blocks.find((b) => b.block_id === f.anchorId) || null;
+      }
+      if (!target && f.blockIdx >= 0 && f.blockIdx < this.blocks.length) {
+        const cand = this.blocks[f.blockIdx];
+        if (cand.type === f.type) {
+          target = cand;
+        }
+      }
+      if (!target) {
+        let bestDist = Infinity;
+        for (let i = 0; i < this.blocks.length; i++) {
+          const b = this.blocks[i];
+          if (b.type === f.type && (b.content || "") === f.content) {
+            const dist = Math.abs(i - f.blockIdx);
+            if (dist < bestDist) {
+              bestDist = dist;
+              target = b;
+            }
+          }
+        }
+      }
+      if (!target) {
+        const clampedIdx = Math.min(this.blocks.length - 1, Math.max(0, f.blockIdx));
+        target = this.blocks[clampedIdx];
+      }
+
+      if (target) {
+        const row = this.containerEl.querySelector(`.block-row[data-id="${CSS.escape(target.id)}"]`);
+        if (row) {
+          if (f.kind === "editable") {
+            const ed = row.querySelector(".block-editable");
+            if (ed) {
+              setCaretAtCharOffset(ed, f.charOffset || 0, true);
+            }
+          } else if (f.kind === "code") {
+            const ta = row.querySelector(".code-textarea");
+            if (ta) {
+              ta.focus({ preventScroll: true });
+              const start = Math.min(f.selectionStart || 0, ta.value.length);
+              const end = Math.min(f.selectionEnd || 0, ta.value.length);
+              ta.setSelectionRange(start, end);
+            }
+          } else if (f.kind === "table") {
+            const cell =
+              row.querySelector(
+                `.table-cell-editable[data-row="${f.row}"][data-col="${f.col}"]`
+              ) || row.querySelector(".table-cell-editable");
+            if (cell) {
+              setCaretAtCharOffset(cell, f.charOffset || 0, true);
+            }
+          } else {
+            const card = row.querySelector(".block-image-card, .block-divider-card");
+            if (card) card.focus({ preventScroll: true });
+          }
+        }
+      }
+    }
+
+    if (scrollEl && targetScrollTop !== null) {
+      scrollEl.scrollTop = targetScrollTop;
+      requestAnimationFrame(() => {
+        if (scrollEl.isConnected) {
+          scrollEl.scrollTop = targetScrollTop;
+        }
+      });
+    }
   }
 
   getBlocks() {
