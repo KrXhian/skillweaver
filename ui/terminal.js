@@ -234,11 +234,10 @@ export class TerminalPanel {
   updatePromptUi() {
     if (this.isRunning) {
       this.promptPrefixEl.textContent = ">";
-      this.inputEl.placeholder = "Running (Ctrl+C to stop, or type stdin)...";
     } else {
       this.promptPrefixEl.textContent = `PS ${this.cwd || "~"}>`;
-      this.inputEl.placeholder = "Type a command...";
     }
+    this.inputEl.removeAttribute("placeholder");
   }
 
   async open() {

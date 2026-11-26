@@ -1,27 +1,41 @@
 pub mod ai;
 mod commands;
 pub mod markdown;
+pub mod mcp;
 pub mod prefs;
 pub mod terminal;
 pub mod vault;
+pub mod watcher;
 
 use commands::AppState;
 use std::sync::Mutex;
+use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .setup(|app| {
+            let saved = prefs::load_prefs();
+            if saved.zoom_percent != prefs::ZOOM_DEFAULT_PERCENT {
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.set_zoom((saved.zoom_percent as f64) / 100.0);
+                }
+            }
+            Ok(())
+        })
         .manage(AppState {
             vault_root: Mutex::new(None),
         })
         .manage(terminal::TerminalState::default())
         .manage(ai::AiState::default())
+        .manage(watcher::VaultWatcherState::default())
         .invoke_handler(tauri::generate_handler![
             commands::get_startup_state,
             commands::pick_folder,
             commands::open_folder,
             commands::refresh_vault,
             commands::open_note,
+            commands::check_note_on_disk,
             commands::save_note_blocks,
             commands::save_note_raw,
             commands::parse_raw_markdown,
@@ -32,6 +46,7 @@ pub fn run() {
             commands::delete_entry,
             commands::resolve_link,
             commands::save_ui_prefs,
+            commands::set_window_zoom,
             commands::save_pasted_image,
             commands::read_image_data_url,
             commands::terminal_start,
@@ -43,6 +58,13 @@ pub fn run() {
             commands::save_ai_prefs,
             commands::ai_chat_stream,
             commands::ai_cancel_stream,
+            commands::ai_list_models,
+            commands::get_cached_models,
+            commands::ai_list_chats,
+            commands::ai_load_chat,
+            commands::ai_save_chat,
+            commands::ai_update_chat_meta,
+            commands::ai_delete_chat,
             commands::search_vault,
             commands::resolve_block_reference,
             commands::get_vault_graph,

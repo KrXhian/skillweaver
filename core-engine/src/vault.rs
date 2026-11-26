@@ -398,6 +398,25 @@ pub fn read_note(root: &Path, rel_path: &str) -> Result<String, String> {
     fs::read_to_string(&full).map_err(|e| format!("Failed to read {rel_path}: {e}"))
 }
 
+/// Computes a fast deterministic 64-bit FNV-1a hex hash of file contents.
+pub fn content_hash(content: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in content.as_bytes() {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+/// Returns the file modification timestamp in Unix epoch milliseconds, if available.
+pub fn read_note_mtime_ms(root: &Path, rel_path: &str) -> Option<u64> {
+    let full = resolve_vault_path(root, rel_path).ok()?;
+    let meta = fs::metadata(&full).ok()?;
+    let modified = meta.modified().ok()?;
+    let millis = modified.duration_since(UNIX_EPOCH).ok()?.as_millis();
+    u64::try_from(millis).ok()
+}
+
 pub fn write_note(root: &Path, rel_path: &str, content: &str) -> Result<(), String> {
     let full = resolve_vault_path(root, rel_path)?;
     if let Some(parent) = full.parent() {
@@ -437,8 +456,9 @@ fn rewrite_links_across_vault(
     old_basename: &str,
     new_target: &str,
     is_old_basename_unique: bool,
-) -> Result<(), String> {
+) -> Result<Vec<(String, String)>, String> {
     let pages = list_pages(root)?;
+    let mut rewritten = Vec::new();
     for page in pages {
         if let Ok(content) = read_note(root, &page.rel_path) {
             let (updated, changed) = rewrite_wikilinks(
@@ -450,14 +470,20 @@ fn rewrite_links_across_vault(
             );
             if changed {
                 write_note(root, &page.rel_path, &updated)?;
+                rewritten.push((page.rel_path, content_hash(&updated)));
             }
         }
     }
-    Ok(())
+    Ok(rewritten)
 }
 
-/// Renames a `.md` file or folder inside the vault, automatically updating incoming `[[wikilinks]]`.
-pub fn rename_entry(root: &Path, old_rel: &str, new_rel: &str) -> Result<String, String> {
+/// Renames a `.md` file or folder inside the vault, updating incoming `[[wikilinks]]`
+/// and returning `(new_rel_path, Vec<(rewritten_rel_path, content_hash)>)`.
+pub fn rename_entry_tracked(
+    root: &Path,
+    old_rel: &str,
+    new_rel: &str,
+) -> Result<(String, Vec<(String, String)>), String> {
     let old_norm = normalize_rel_path(old_rel)?;
     let old_full = resolve_vault_path(root, &old_norm)?;
     if !old_full.exists() {
@@ -472,7 +498,7 @@ pub fn rename_entry(root: &Path, old_rel: &str, new_rel: &str) -> Result<String,
     };
 
     if old_norm.eq_ignore_ascii_case(&new_norm) && old_norm == new_norm {
-        return Ok(new_norm);
+        return Ok((new_norm, Vec::new()));
     }
 
     if is_dir
@@ -500,6 +526,7 @@ pub fn rename_entry(root: &Path, old_rel: &str, new_rel: &str) -> Result<String,
     fs::rename(&old_full, &new_full)
         .map_err(|e| format!("Failed to rename {old_norm} to {new_norm}: {e}"))?;
 
+    let mut rewritten = Vec::new();
     if !is_dir && is_markdown_file(&new_full) {
         let old_target = strip_md_ext(&old_norm);
         let new_target = strip_md_ext(&new_norm);
@@ -508,13 +535,13 @@ pub fn rename_entry(root: &Path, old_rel: &str, new_rel: &str) -> Result<String,
             .iter()
             .filter(|p| p.title.eq_ignore_ascii_case(old_basename))
             .count();
-        rewrite_links_across_vault(
+        rewritten.extend(rewrite_links_across_vault(
             root,
             &old_target,
             old_basename,
             &new_target,
             basename_count <= 1,
-        )?;
+        )?);
     } else if is_dir {
         let prefix = format!("{old_norm}/");
         for page in &pages_before {
@@ -527,18 +554,23 @@ pub fn rename_entry(root: &Path, old_rel: &str, new_rel: &str) -> Result<String,
                     .iter()
                     .filter(|p| p.title.eq_ignore_ascii_case(old_basename))
                     .count();
-                rewrite_links_across_vault(
+                rewritten.extend(rewrite_links_across_vault(
                     root,
                     &old_target,
                     old_basename,
                     &new_target,
                     basename_count <= 1,
-                )?;
+                )?);
             }
         }
     }
 
-    Ok(new_norm)
+    Ok((new_norm, rewritten))
+}
+
+/// Renames a `.md` file or folder inside the vault, automatically updating incoming `[[wikilinks]]`.
+pub fn rename_entry(root: &Path, old_rel: &str, new_rel: &str) -> Result<String, String> {
+    rename_entry_tracked(root, old_rel, new_rel).map(|(new_norm, _)| new_norm)
 }
 
 pub fn delete_entry(root: &Path, rel_path: &str) -> Result<(), String> {
@@ -1113,8 +1145,14 @@ fn block_ref_id(block: &Block) -> Option<&str> {
     match block {
         Block::Heading { block_id, .. }
         | Block::Paragraph { block_id, .. }
+        | Block::BulletList { block_id, .. }
+        | Block::NumberedList { block_id, .. }
+        | Block::Todo { block_id, .. }
+        | Block::Quote { block_id, .. }
+        | Block::Divider { block_id, .. }
         | Block::Code { block_id, .. }
-        | Block::Image { block_id, .. } => block_id.as_deref(),
+        | Block::Image { block_id, .. }
+        | Block::Table { block_id, .. } => block_id.as_deref(),
     }
 }
 
@@ -1547,6 +1585,52 @@ mod tests {
             .find(|n| !n.exists && n.label == "Missing Note")
             .unwrap();
         assert_eq!(ghost.degree, 1);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolve_block_reference_finds_table_block_id() {
+        let root = temp_vault("table_ref");
+        create_note(&root, "hero").unwrap();
+        create_note(&root, "matrix").unwrap();
+
+        write_note(
+            &root,
+            "matrix.md",
+            "# Matrix\n\n| Col A | Col B |\n| --- | --- |\n| 1 | 2 |\n^tbl123\n",
+        )
+        .unwrap();
+
+        let table_ref = resolve_block_reference(&root, Some("hero.md"), "matrix#^tbl123")
+            .unwrap()
+            .unwrap();
+        assert_eq!(table_ref.rel_path, "matrix.md");
+        assert!(table_ref.content.contains("| Col A | Col B |"));
+        assert!(table_ref.content.contains("| 1 | 2 |"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn content_hash_is_deterministic_and_sensitive() {
+        let h1 = content_hash("# Hello\n\nWorld\n");
+        let h2 = content_hash("# Hello\n\nWorld\n");
+        let h3 = content_hash("# Hello\n\nWorld!\n");
+        assert_eq!(h1, h2);
+        assert_ne!(h1, h3);
+        assert_eq!(h1.len(), 16);
+        assert!(h1.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    }
+
+    #[test]
+    fn read_note_mtime_ms_returns_some_for_existing_and_none_for_missing() {
+        let root = temp_vault("mtime");
+        create_note(&root, "alpha").unwrap();
+        write_note(&root, "alpha.md", "hello").unwrap();
+
+        assert!(read_note_mtime_ms(&root, "alpha.md").is_some());
+        assert!(read_note_mtime_ms(&root, "missing.md").is_none());
 
         let _ = fs::remove_dir_all(&root);
     }

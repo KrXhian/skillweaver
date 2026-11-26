@@ -109,12 +109,25 @@
       </header>
 
       <div class="workspace-body">
+        <!-- External Disk Conflict Banner -->
+        <div id="external-conflict-banner" class="conflict-banner" role="alert" hidden>
+          <div class="conflict-banner-info">
+            <span class="conflict-banner-dot" aria-hidden="true"></span>
+            <span id="conflict-banner-text" class="conflict-banner-text"></span>
+          </div>
+          <div class="conflict-banner-actions">
+            <button id="btn-conflict-diff" class="conflict-btn" type="button">View Diff</button>
+            <button id="btn-conflict-keep" class="conflict-btn" type="button">Keep Mine</button>
+            <button id="btn-conflict-reload" class="conflict-btn conflict-btn-primary" type="button">Reload</button>
+          </div>
+        </div>
+
         <!-- Welcome / Empty View -->
         <section id="welcome-view" class="welcome-view">
           <div class="welcome-card">
             <h1>Skillweaver</h1>
             <p id="welcome-subtitle" class="welcome-subtitle">
-              Lightweight Notion-style block editor over plain <code>.md</code> folders.
+              Lightweight block-based editor over plain <code>.md</code> folders.
             </p>
             <div class="welcome-actions">
               <button id="btn-welcome-open" class="primary-btn">Open Folder <kbd>Ctrl+O</kbd></button>
@@ -124,8 +137,10 @@
               <div class="cheat-row"><kbd># </kbd><span>Collapsible Header (<code>#</code>, <code>##</code>, <code>###</code>)</span></div>
               <div class="cheat-row"><kbd>Ctrl+B</kbd><span>Bold text &amp; <code>`inline code`</code></span></div>
               <div class="cheat-row"><kbd>```</kbd><span>Fenced Code Block</span></div>
-              <div class="cheat-row"><kbd>@@</kbd><span>Link any <code>.md</code> page (Obsidian <code>[[wikilinks]]</code>)</span></div>
+              <div class="cheat-row"><kbd>/table</kbd><span>Table block (or type <code>| A | B |</code> + Enter)</span></div>
+              <div class="cheat-row"><kbd>@@</kbd><span>Link any <code>.md</code> page (<code>[[wikilinks]]</code>)</span></div>
             </div>
+            <div class="welcome-credit">Skillweaver&trade; &middot; Created by the Blue Frog Foundation</div>
           </div>
         </section>
 
@@ -159,7 +174,7 @@
           <textarea id="raw-textarea" class="raw-textarea" spellcheck="false" placeholder="Write Markdown..."></textarea>
         </div>
 
-        <!-- Obsidian-Style Knowledge Graph View -->
+        <!-- Interactive Knowledge Graph View -->
         <section id="graph-view" class="graph-view" aria-label="Knowledge Graph View" hidden>
           <canvas id="graph-canvas" class="graph-canvas"></canvas>
           <div class="graph-controls">
@@ -213,7 +228,7 @@
           <div id="terminal-output" class="terminal-output"></div>
           <div class="terminal-prompt-row">
             <span id="terminal-prompt-prefix" class="terminal-prompt-prefix">PS &gt;</span>
-            <input id="terminal-input" class="terminal-input" type="text" spellcheck="false" autocomplete="off" placeholder="Type a command..." />
+            <input id="terminal-input" class="terminal-input" type="text" spellcheck="false" autocomplete="off" />
           </div>
         </div>
       </section>
@@ -224,18 +239,22 @@
     <aside id="ai-panel" class="ai-panel" aria-label="AI Assistant" hidden>
       <div class="ai-header">
         <div class="ai-header-left">
-          <span class="ai-title">AI Assistant</span>
-        </div>
-        <div class="ai-header-actions">
-          <button id="ai-btn-settings" class="icon-btn" title="API Key & Provider Settings" aria-label="AI Settings">
+          <button id="ai-btn-history" class="icon-btn ai-history-btn" title="Chat History" aria-label="Chat History">
             <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35">
-              <circle cx="8" cy="8" r="2.2"/>
-              <path d="M8 1.8v1.5M8 12.7v1.5M1.8 8h1.5M12.7 8h1.5M3.6 3.6l1.1 1.1M11.3 11.3l1.1 1.1M12.4 3.6l-1.1 1.1M4.7 11.3l-1.1 1.1"/>
+              <circle cx="8" cy="8" r="5.5"/>
+              <path d="M8 5v3.2l2.1 1.4"/>
             </svg>
           </button>
-          <button id="ai-btn-clear" class="icon-btn" title="New Chat" aria-label="Clear Chat">
-            <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
-              <path d="M3 4h10M5.5 4V2.5h5V4M4.5 4l.8 9.5h5.4L11.5 4"/>
+          <span class="ai-title">AI Assistant</span>
+          <button id="ai-model-badge" class="ai-model-badge" type="button" title="Switch AI model"></button>
+        </div>
+        <div class="ai-header-actions">
+          <button id="ai-btn-settings" class="top-text-btn ai-settings-btn" title="API Key, Provider &amp; Model Settings" aria-label="AI Settings">
+            Settings
+          </button>
+          <button id="ai-btn-clear" class="icon-btn" title="New Conversation" aria-label="New Conversation">
+            <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M8 3.2v9.6M3.2 8h9.6"/>
             </svg>
           </button>
           <button id="ai-btn-close" class="icon-btn" title="Close AI Panel (Ctrl+Shift+A)" aria-label="Close AI">
@@ -244,6 +263,16 @@
             </svg>
           </button>
         </div>
+      </div>
+
+      <div id="ai-model-popover" class="popover ai-model-popover" hidden role="listbox" aria-label="Switch AI model"></div>
+
+      <div id="ai-history-drawer" class="ai-history-drawer" hidden aria-label="Chat History">
+        <div class="ai-history-top">
+          <button id="ai-btn-new-chat" class="ai-new-chat-btn" type="button">+ New Conversation</button>
+          <input id="ai-history-search" class="ai-history-search" type="search" placeholder="Search conversations..." autocomplete="off" />
+        </div>
+        <div id="ai-history-list" class="ai-history-list"></div>
       </div>
 
       <div id="ai-settings-drawer" class="ai-settings-drawer" hidden>
@@ -267,7 +296,11 @@
         </label>
         <label class="ai-field">
           <span>Model</span>
-          <input id="ai-model" type="text" placeholder="e.g. gpt-4o-mini" autocomplete="off" />
+          <div class="ai-model-row">
+            <input id="ai-model" type="text" placeholder="e.g. gemini-3.5-flash-lite" autocomplete="off" />
+            <button id="ai-btn-pick-model" class="top-text-btn ai-model-icon-btn" type="button" title="Show available models">▾</button>
+            <button id="ai-btn-fetch-models" class="top-text-btn ai-model-icon-btn" type="button" title="Fetch live models from provider">↻</button>
+          </div>
         </label>
         <label class="ai-field">
           <span>Base URL</span>
@@ -278,12 +311,16 @@
         </div>
       </div>
 
-      <div id="ai-messages" class="ai-messages"></div>
+      <div class="ai-messages-wrap">
+        <div id="ai-turn-rail" class="ai-turn-rail" hidden aria-label="Jump to message turn"></div>
+        <div id="ai-messages" class="ai-messages"></div>
+      </div>
 
       <div class="ai-composer">
+        <div id="ai-mention-popover" class="popover ai-mention-popover" hidden role="listbox" aria-label="Mention page"></div>
         <div id="ai-context-chips" class="ai-context-chips"></div>
         <div class="ai-input-box">
-          <textarea id="ai-input" class="ai-input" rows="1" placeholder="Ask about this note, highlights, or folder..."></textarea>
+          <div id="ai-input" class="ai-input" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Ask AI" spellcheck="true" data-placeholder="Ask about this note, highlights, or folder..."></div>
           <div class="ai-send-row">
             <span class="ai-send-hint">Enter to send · Shift+Enter newline</span>
             <button id="ai-send-btn" class="primary-btn ai-send-btn" type="button">Send</button>
@@ -297,10 +334,32 @@
   <!-- Floating Text Selection Toolbar -->
   <div id="selection-toolbar" class="selection-toolbar" hidden role="toolbar" aria-label="Text formatting">
     <button id="btn-sel-bold" class="sel-btn" title="Bold (Ctrl+B)"><strong>B</strong></button>
+    <button id="btn-sel-italic" class="sel-btn" title="Italic (Ctrl+I)"><em>I</em></button>
     <button id="btn-sel-code" class="sel-btn" title="Inline Code (Ctrl+E)"><code>&lt;/&gt;</code></button>
     <button id="btn-sel-highlight" class="sel-btn" title="Highlight (==text==)"><mark class="inline-highlight">H</mark></button>
+    <button id="btn-sel-color" class="sel-btn sel-btn-color" title="Text &amp; background color (Ctrl+Shift+H)">
+      <span class="sel-color-a">A</span><span class="sel-color-caret">▾</span>
+    </button>
     <button id="btn-sel-ai" class="sel-btn sel-btn-ai" title="Ask AI (Ctrl+J)">Ask AI</button>
   </div>
+
+  <!-- Floating Multi-Block Selection Action Bar -->
+  <div id="block-selection-bar" class="block-selection-bar" hidden role="toolbar" aria-label="Selected blocks actions">
+    <span id="block-sel-count" class="block-sel-count">1 block</span>
+    <span class="block-sel-sep"></span>
+    <button id="btn-blocks-ask-ai" class="sel-btn sel-btn-ai" title="Ask AI about selected blocks (Ctrl+J)">Ask AI</button>
+    <button id="btn-blocks-color" class="sel-btn" title="Color selected blocks (Ctrl+Shift+H)">Color</button>
+    <button id="btn-blocks-outdent" class="sel-btn" title="Outdent selected blocks (Shift+Tab)">Outdent</button>
+    <button id="btn-blocks-dup" class="sel-btn" title="Duplicate selected blocks (Ctrl+D)">Duplicate</button>
+    <button id="btn-blocks-del" class="sel-btn block-sel-danger" title="Delete selected blocks (Del)">Delete</button>
+    <button id="btn-blocks-clear" class="sel-btn" title="Clear selection (Esc)" aria-label="Clear selection">×</button>
+  </div>
+
+  <!-- Drag Marquee Selection Box -->
+  <div id="block-marquee" class="block-marquee" hidden></div>
+
+  <!-- AI Conversation Turn Scrubber Preview -->
+  <div id="ai-turn-preview" class="ai-turn-preview" hidden role="tooltip"></div>
 
   <!-- @@ Link Autocomplete Popover -->
   <div id="link-popover" class="popover link-popover" hidden role="listbox" aria-label="Link to page"></div>
@@ -335,9 +394,40 @@
     </div>
   </div>
 
+  <!-- Disk Conflict Diff Modal -->
+  <div id="diff-modal" class="modal-backdrop diff-modal-backdrop" hidden>
+    <div class="modal-panel diff-modal-panel" role="dialog" aria-modal="true" aria-labelledby="diff-modal-title">
+      <div class="diff-modal-header">
+        <div class="diff-modal-heading">
+          <h2 id="diff-modal-title" class="diff-modal-title">External Changes on Disk</h2>
+          <span id="diff-modal-subtitle" class="diff-modal-subtitle"></span>
+        </div>
+        <div class="diff-modal-header-right">
+          <span id="diff-modal-stats" class="diff-modal-stats"></span>
+          <button id="diff-modal-close" class="icon-btn" type="button" title="Close (Esc)" aria-label="Close Diff">
+            <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M4 4l8 8M12 4l-8 8"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+      <div class="diff-modal-legend">
+        <span class="diff-legend-item diff-legend-del">− Only in your unsaved buffer</span>
+        <span class="diff-legend-item diff-legend-add">+ On disk</span>
+      </div>
+      <div id="diff-modal-body" class="diff-modal-body"></div>
+      <div class="diff-modal-footer">
+        <button id="diff-btn-cancel" class="secondary-btn" type="button">Close</button>
+        <button id="diff-btn-keep" class="secondary-btn" type="button">Keep Mine</button>
+        <button id="diff-btn-reload" class="primary-btn" type="button">Reload from Disk</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Toast Notification -->
   <div id="toast" class="toast" hidden role="status"></div>
 
+  <script src="vendor/prism.min.js" data-manual></script>
   <script type="module" src="app.js"></script>
 </body>
 </html>

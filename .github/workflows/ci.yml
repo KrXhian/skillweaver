@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  check-and-test:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core-engine -> target
+
+      - name: Check all targets
+        run: cargo check --manifest-path core-engine/Cargo.toml --all-targets
+
+      - name: Run unit tests
+        run: cargo test --manifest-path core-engine/Cargo.toml
