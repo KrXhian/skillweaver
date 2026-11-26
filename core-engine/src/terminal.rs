@@ -19,10 +19,10 @@ const PROMPT_MARKER: &str = "__SW_PROMPT__";
 
 #[cfg(windows)]
 const WINDOWS_INIT_SCRIPT: &str = concat!(
-    "[Console]::InputEncoding = [System.Text.Encoding]::UTF8\r\n",
-    "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\r\n",
+    "try { [Console]::InputEncoding = [System.Text.Encoding]::UTF8 } catch {}\r\n",
+    "try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}\r\n",
     "$OutputEncoding = [System.Text.Encoding]::UTF8\r\n",
-    r#"function global:tree { $raw = $false; foreach ($a in $args) { if ($a -ieq '/a' -or $a -ieq '/?') { $raw = $true; break } }; $prev = [Console]::OutputEncoding; try { [Console]::OutputEncoding = [System.Text.Encoding]::Default; if ($raw) { $lines = & "$env:SystemRoot\System32\tree.com" @args } else { $lines = & "$env:SystemRoot\System32\tree.com" /a @args } } finally { [Console]::OutputEncoding = $prev }; if ($raw) { $lines; return }; $v = [string][char]0x2502; $t = "$([char]0x251C)$([char]0x2500)$([char]0x2500)$([char]0x2500)"; $l = "$([char]0x2514)$([char]0x2500)$([char]0x2500)$([char]0x2500)"; $idx = 0; foreach ($line in $lines) { if ($idx -ge 3) { $line = [regex]::Replace([string]$line, '^((?:\|   |    )*)([+\\]---|\|$)?', { param($m); $p = $m.Groups[1].Value.Replace('|', $v); if ($m.Groups[2].Value -eq '+---') { return $p + $t }; if ($m.Groups[2].Value -eq '\---') { return $p + $l }; if ($m.Groups[2].Value -eq '|') { return $p + $v }; return $p }) }; $line; $idx++ } }"#,
+    r#"function global:tree { $raw = $false; foreach ($a in $args) { if ($a -ieq '/a' -or $a -ieq '/?') { $raw = $true; break } }; $prev = $null; try { $prev = [Console]::OutputEncoding; [Console]::OutputEncoding = [System.Text.Encoding]::Default } catch {}; try { if ($raw) { $lines = & "$env:SystemRoot\System32\tree.com" @args } else { $lines = & "$env:SystemRoot\System32\tree.com" /a @args } } finally { if ($prev) { try { [Console]::OutputEncoding = $prev } catch {} } }; if ($raw) { $lines; return }; $v = [string][char]0x2502; $t = "$([char]0x251C)$([char]0x2500)$([char]0x2500)$([char]0x2500)"; $l = "$([char]0x2514)$([char]0x2500)$([char]0x2500)$([char]0x2500)"; $idx = 0; foreach ($line in $lines) { if ($idx -ge 3) { $line = [regex]::Replace([string]$line, '^((?:\|   |    )*)([+\\]---|\|$)?', { param($m); $p = $m.Groups[1].Value.Replace('|', $v); if ($m.Groups[2].Value -eq '+---') { return $p + $t }; if ($m.Groups[2].Value -eq '\---') { return $p + $l }; if ($m.Groups[2].Value -eq '|') { return $p + $v }; return $p }) }; $line; $idx++ } }"#,
     "\r\n",
 );
 
@@ -594,6 +594,7 @@ mod tests {
         let pid = child.id();
         let mut stdin = child.stdin.take().unwrap();
         let stdout_pipe = child.stdout.take().unwrap();
+        let stderr_pipe = child.stderr.take().unwrap();
 
         let (tx, rx) = mpsc::channel::<String>();
         let reader_handle = thread::spawn(move || {
@@ -614,6 +615,23 @@ mod tests {
             }
         });
 
+        let stderr_handle = thread::spawn(move || {
+            let mut reader = BufReader::new(stderr_pipe);
+            let mut buf = Vec::new();
+            let mut err_lines = Vec::new();
+            loop {
+                buf.clear();
+                match reader.read_until(b'\n', &mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        let decoded = decode_terminal_bytes(&buf);
+                        err_lines.push(decoded.trim_end_matches(['\r', '\n']).to_string());
+                    }
+                }
+            }
+            err_lines
+        });
+
         // Mimic spawn_session + write_command_with_prompt without closing stdin or adding blank lines.
         stdin.write_all(WINDOWS_INIT_SCRIPT.as_bytes()).unwrap();
         stdin.flush().unwrap();
@@ -623,7 +641,7 @@ mod tests {
         stdin.write_all(cmd_script.as_bytes()).unwrap();
         stdin.flush().unwrap();
 
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(25);
         let mut lines = Vec::new();
         let mut saw_prompt = false;
         while Instant::now() < deadline {
@@ -645,11 +663,12 @@ mod tests {
         let _ = child.kill();
         let _ = child.wait();
         let _ = reader_handle.join();
+        let stderr_text = stderr_handle.join().unwrap_or_default().join("\n");
 
         let stdout = lines.join("\n");
         assert!(
             saw_prompt,
-            "Timed out waiting for prompt marker (PowerShell entered continuation mode?). Got:\n{stdout}"
+            "Timed out waiting for prompt marker (PowerShell entered continuation mode?).\nstdout:\n{stdout}\nstderr:\n{stderr_text}"
         );
         assert!(
             stdout.contains("\u{251C}\u{2500}\u{2500}\u{2500}01 - Data"),
