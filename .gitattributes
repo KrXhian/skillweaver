@@ -1,0 +1,2 @@
+# Keep third-party vendored bundles out of Git diffs and GitHub language stats
+ui/vendor/** linguist-vendored -diff

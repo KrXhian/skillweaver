@@ -17,6 +17,41 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 const PROMPT_MARKER: &str = "__SW_PROMPT__";
 
+#[cfg(windows)]
+const WINDOWS_INIT_SCRIPT: &str = concat!(
+    "[Console]::InputEncoding = [System.Text.Encoding]::UTF8\r\n",
+    "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\r\n",
+    "$OutputEncoding = [System.Text.Encoding]::UTF8\r\n",
+    r#"function global:tree { $raw = $false; foreach ($a in $args) { if ($a -ieq '/a' -or $a -ieq '/?') { $raw = $true; break } }; $prev = [Console]::OutputEncoding; try { [Console]::OutputEncoding = [System.Text.Encoding]::Default; if ($raw) { $lines = & "$env:SystemRoot\System32\tree.com" @args } else { $lines = & "$env:SystemRoot\System32\tree.com" /a @args } } finally { [Console]::OutputEncoding = $prev }; if ($raw) { $lines; return }; $v = [string][char]0x2502; $t = "$([char]0x251C)$([char]0x2500)$([char]0x2500)$([char]0x2500)"; $l = "$([char]0x2514)$([char]0x2500)$([char]0x2500)$([char]0x2500)"; $idx = 0; foreach ($line in $lines) { if ($idx -ge 3) { $line = [regex]::Replace([string]$line, '^((?:\|   |    )*)([+\\]---|\|$)?', { param($m); $p = $m.Groups[1].Value.Replace('|', $v); if ($m.Groups[2].Value -eq '+---') { return $p + $t }; if ($m.Groups[2].Value -eq '\---') { return $p + $l }; if ($m.Groups[2].Value -eq '|') { return $p + $v }; return $p }) }; $line; $idx++ } }"#,
+    "\r\n",
+);
+
+#[cfg(windows)]
+const WIN1252_80_9F: [char; 32] = [
+    '\u{20AC}', '\u{0081}', '\u{201A}', '\u{0192}', '\u{201E}', '\u{2026}', '\u{2020}', '\u{2021}',
+    '\u{02C6}', '\u{2030}', '\u{0160}', '\u{2039}', '\u{0152}', '\u{008D}', '\u{017D}', '\u{008F}',
+    '\u{0090}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '\u{2022}', '\u{2013}', '\u{2014}',
+    '\u{02DC}', '\u{2122}', '\u{0161}', '\u{203A}', '\u{0153}', '\u{009D}', '\u{017E}', '\u{0178}',
+];
+
+/// Decodes terminal bytes as UTF-8 when valid, falling back to Windows-1252 for legacy console output.
+pub(crate) fn decode_terminal_bytes(bytes: &[u8]) -> String {
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(bytes.len());
+    for &b in bytes {
+        if b < 0x80 {
+            out.push(b as char);
+        } else if b < 0xA0 {
+            out.push(WIN1252_80_9F[(b - 0x80) as usize]);
+        } else {
+            out.push(b as char);
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct TerminalOutputEvent {
     pub stream: String,
@@ -142,10 +177,7 @@ fn spawn_session(app: &AppHandle, start_dir: &Path) -> Result<TerminalSession, S
 
     #[cfg(windows)]
     {
-        let init_script = "[Console]::InputEncoding = [System.Text.Encoding]::UTF8\r\n\
-                           [Console]::OutputEncoding = [System.Text.Encoding]::UTF8\r\n\
-                           $OutputEncoding = [System.Text.Encoding]::UTF8\r\n";
-        let _ = stdin.write_all(init_script.as_bytes());
+        let _ = stdin.write_all(WINDOWS_INIT_SCRIPT.as_bytes());
         let _ = stdin.flush();
     }
 
@@ -163,8 +195,8 @@ fn spawn_session(app: &AppHandle, start_dir: &Path) -> Result<TerminalSession, S
             match reader.read_until(b'\n', &mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(_) => {
-                    let line_lossy = String::from_utf8_lossy(&buf);
-                    let line = line_lossy.trim_end_matches(['\r', '\n']);
+                    let decoded = decode_terminal_bytes(&buf);
+                    let line = decoded.trim_end_matches(['\r', '\n']);
                     if let Some(next_cwd) = parse_prompt_marker(line) {
                         if let Ok(mut guard) = cwd_out.lock() {
                             *guard = next_cwd.clone();
@@ -198,8 +230,8 @@ fn spawn_session(app: &AppHandle, start_dir: &Path) -> Result<TerminalSession, S
             match reader.read_until(b'\n', &mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(_) => {
-                    let line_lossy = String::from_utf8_lossy(&buf);
-                    let line = line_lossy.trim_end_matches(['\r', '\n']);
+                    let decoded = decode_terminal_bytes(&buf);
+                    let line = decoded.trim_end_matches(['\r', '\n']);
                     let _ = app_err.emit(
                         "terminal-output",
                         TerminalOutputEvent {
@@ -484,8 +516,8 @@ mod tests {
     #[test]
     fn parse_prompt_marker_extracts_clean_cwd() {
         assert_eq!(
-            parse_prompt_marker(r"__SW_PROMPT__\\?\C:\Users\Krist\vault"),
-            Some(r"C:\Users\Krist\vault".to_string())
+            parse_prompt_marker(r"__SW_PROMPT__\\?\C:\Users\alice\vault"),
+            Some(r"C:\Users\alice\vault".to_string())
         );
         assert_eq!(parse_prompt_marker("normal output line"), None);
     }
@@ -493,8 +525,8 @@ mod tests {
     #[test]
     fn escape_ps_single_quoted_doubles_quotes() {
         assert_eq!(
-            escape_ps_single_quoted(r"C:\Krist's Notes\md"),
-            r"C:\Krist''s Notes\md"
+            escape_ps_single_quoted(r"C:\Alice's Notes\md"),
+            r"C:\Alice''s Notes\md"
         );
     }
 
@@ -514,6 +546,124 @@ mod tests {
 
         let sub_matches = complete_path_in_dir(&root, "notes/a");
         assert_eq!(sub_matches, vec!["notes/alpha.md"]);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn decode_terminal_bytes_preserves_utf8_and_decodes_cp1252() {
+        let utf8 = "├───01 - Data\n│   test.md\n└───assets\n";
+        assert_eq!(decode_terminal_bytes(utf8.as_bytes()), utf8);
+        // Legacy CP1252 bytes (0x80 = Euro, 0x97 = em-dash, 0xA6 = broken bar)
+        assert_eq!(
+            decode_terminal_bytes(&[0x80, b' ', 0x97, b' ', 0xA6]),
+            "\u{20AC} \u{2014} \u{00A6}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_tree_wrapper_renders_unicode_box_drawing_without_replacement_char() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let root = temp_dir("tree_box");
+        fs::create_dir_all(root.join("01 - Data")).unwrap();
+        fs::create_dir_all(root.join("02 - Data")).unwrap();
+        fs::write(root.join("01 - Data").join("01 - Data Test.md"), "# 1").unwrap();
+        fs::write(root.join("02 - Data").join("test.md"), "# 2").unwrap();
+
+        let mut child = Command::new("powershell.exe")
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NoExit",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "-",
+            ])
+            .current_dir(&root)
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let pid = child.id();
+        let mut stdin = child.stdin.take().unwrap();
+        let stdout_pipe = child.stdout.take().unwrap();
+
+        let (tx, rx) = mpsc::channel::<String>();
+        let reader_handle = thread::spawn(move || {
+            let mut reader = BufReader::new(stdout_pipe);
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                match reader.read_until(b'\n', &mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        let decoded = decode_terminal_bytes(&buf);
+                        let line = decoded.trim_end_matches(['\r', '\n']).to_string();
+                        if tx.send(line).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        // Mimic spawn_session + write_command_with_prompt without closing stdin or adding blank lines.
+        stdin.write_all(WINDOWS_INIT_SCRIPT.as_bytes()).unwrap();
+        stdin.flush().unwrap();
+        let cmd_script = format!(
+            "tree /f\r\n[Console]::Out.WriteLine(\"{PROMPT_MARKER}$((Get-Location).Path)\")\r\n"
+        );
+        stdin.write_all(cmd_script.as_bytes()).unwrap();
+        stdin.flush().unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut lines = Vec::new();
+        let mut saw_prompt = false;
+        while Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match rx.recv_timeout(remaining) {
+                Ok(line) => {
+                    if parse_prompt_marker(&line).is_some() {
+                        saw_prompt = true;
+                        break;
+                    }
+                    lines.push(line);
+                }
+                Err(_) => break,
+            }
+        }
+
+        drop(stdin);
+        kill_process_tree(pid);
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = reader_handle.join();
+
+        let stdout = lines.join("\n");
+        assert!(
+            saw_prompt,
+            "Timed out waiting for prompt marker (PowerShell entered continuation mode?). Got:\n{stdout}"
+        );
+        assert!(
+            stdout.contains("\u{251C}\u{2500}\u{2500}\u{2500}01 - Data"),
+            "Expected Unicode tee branch, got:\n{stdout}"
+        );
+        assert!(
+            stdout.contains("\u{2502}"),
+            "Expected Unicode vertical bar, got:\n{stdout}"
+        );
+        assert!(
+            stdout.contains("\u{2514}\u{2500}\u{2500}\u{2500}02 - Data"),
+            "Expected Unicode corner branch, got:\n{stdout}"
+        );
+        assert!(!stdout.contains('\u{FFFD}'), "Unexpected U+FFFD in:\n{stdout}");
 
         let _ = fs::remove_dir_all(&root);
     }

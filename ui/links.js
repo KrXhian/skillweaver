@@ -3,10 +3,10 @@ import { createPageLinkElement, escapeHtml } from "./inline.js";
 /**
  * Ranks vault pages by relevance to `query` (exact/prefix title > substring title > path).
  */
-export function filterPages(pages, query) {
+export function filterPages(pages, query, limit = 20) {
   const q = String(query || "").trim().toLowerCase();
   if (!q) {
-    return pages.slice(0, 20);
+    return Number.isFinite(limit) ? pages.slice(0, limit) : pages.slice();
   }
 
   const scored = [];
@@ -31,7 +31,8 @@ export function filterPages(pages, query) {
     return a.page.rel_path.localeCompare(b.page.rel_path);
   });
 
-  return scored.slice(0, 20).map((s) => s.page);
+  const sliced = Number.isFinite(limit) ? scored.slice(0, limit) : scored;
+  return sliced.map((s) => s.page);
 }
 
 function fuzzyMatch(needle, haystack) {
@@ -302,7 +303,7 @@ export class LinkAutocomplete {
 }
 
 /**
- * VS Code / Obsidian-style Ctrl+P quick switcher modal.
+ * Ctrl+P quick switcher modal.
  */
 export class QuickSwitcher {
   constructor(backdropEl, inputEl, listEl, { getPages, onSelect }) {

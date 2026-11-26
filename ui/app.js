@@ -1,4 +1,5 @@
 import { AiPanel } from "./ai.js";
+import { DiffModal } from "./diff.js";
 import { BlockEditor } from "./editor.js";
 import { GraphView } from "./graph.js";
 import { escapeHtml } from "./inline.js";
@@ -12,6 +13,12 @@ function invoke(cmd, args = {}) {
     return Promise.reject(new Error("Tauri runtime API is unavailable"));
   }
   return tauriInvoke(cmd, args);
+}
+
+function tauriListen(eventName, handler) {
+  const listenFn = window.__TAURI__?.event?.listen;
+  if (!listenFn) return Promise.resolve(() => {});
+  return listenFn(eventName, handler);
 }
 
 const el = {
@@ -47,8 +54,18 @@ const el = {
   backlinksToggle: document.getElementById("backlinks-toggle"),
   backlinksCount: document.getElementById("backlinks-count"),
   backlinksList: document.getElementById("backlinks-list"),
+  conflictBanner: document.getElementById("external-conflict-banner"),
+  conflictBannerText: document.getElementById("conflict-banner-text"),
+  btnConflictDiff: document.getElementById("btn-conflict-diff"),
+  btnConflictKeep: document.getElementById("btn-conflict-keep"),
+  btnConflictReload: document.getElementById("btn-conflict-reload"),
   toast: document.getElementById("toast"),
 };
+
+const ZOOM_MIN_PERCENT = 50;
+const ZOOM_MAX_PERCENT = 200;
+const ZOOM_STEP_PERCENT = 10;
+const ZOOM_DEFAULT_PERCENT = 100;
 
 const state = {
   prefs: {
@@ -59,6 +76,7 @@ const state = {
     sidebar_collapsed: false,
     terminal_height: 240,
     ai_panel_width: 340,
+    zoom_percent: ZOOM_DEFAULT_PERCENT,
     collapsed_headings: {},
   },
   vault: null,
@@ -66,8 +84,17 @@ const state = {
   rawMode: false,
   graphMode: false,
   isDirty: false,
+  lastKnownDiskHash: null,
+  lastKnownMtimeMs: null,
+  lastKnownDiskMd: null,
+  externalConflict: null,
   saveTimer: null,
+  syncStatusTimer: null,
+  zoomSaveTimer: null,
   toastTimer: null,
+  fsEventQueueRunning: false,
+  pendingFsEvent: null,
+  deferredHotReloadTimer: null,
 };
 
 const imageCache = new Map();
@@ -87,9 +114,12 @@ function showToast(message, isError = false) {
 }
 
 function setSaveStatus(mode) {
+  clearTimeout(state.syncStatusTimer);
+  state.syncStatusTimer = null;
+  el.saveStatus.classList.remove("unsaved", "synced", "conflict");
+
   if (!state.currentFile) {
     el.saveStatus.textContent = "";
-    el.saveStatus.classList.remove("unsaved");
     return;
   }
   if (mode === "unsaved") {
@@ -97,10 +127,20 @@ function setSaveStatus(mode) {
     el.saveStatus.classList.add("unsaved");
   } else if (mode === "saving") {
     el.saveStatus.textContent = "Saving...";
-    el.saveStatus.classList.remove("unsaved");
+  } else if (mode === "conflict") {
+    el.saveStatus.textContent = "• Conflict";
+    el.saveStatus.classList.add("conflict");
+  } else if (mode === "synced") {
+    el.saveStatus.textContent = "Synced from disk";
+    el.saveStatus.classList.add("synced");
+    state.syncStatusTimer = setTimeout(() => {
+      state.syncStatusTimer = null;
+      if (state.currentFile && !state.isDirty && !state.externalConflict) {
+        setSaveStatus("saved");
+      }
+    }, 2400);
   } else {
     el.saveStatus.textContent = "Saved";
-    el.saveStatus.classList.remove("unsaved");
   }
 }
 
@@ -124,6 +164,55 @@ function applyTheme(theme) {
   if (state.graphMode && typeof graphView !== "undefined") {
     graphView.draw();
   }
+}
+
+function clampZoomPercent(value) {
+  const n = Math.round(Number(value));
+  if (!Number.isFinite(n) || n <= 0) return ZOOM_DEFAULT_PERCENT;
+  return Math.min(ZOOM_MAX_PERCENT, Math.max(ZOOM_MIN_PERCENT, n));
+}
+
+function schedulePersistZoom() {
+  clearTimeout(state.zoomSaveTimer);
+  state.zoomSaveTimer = setTimeout(() => {
+    state.zoomSaveTimer = null;
+    persistPrefs();
+  }, 200);
+}
+
+async function applyZoom(percent, { persist = true, toast = true, toastLabel = null } = {}) {
+  const next = clampZoomPercent(percent);
+  state.prefs.zoom_percent = next;
+  try {
+    await invoke("set_window_zoom", { zoomPercent: next });
+    if (toast) {
+      showToast(toastLabel || `Zoom: ${next}%`);
+    }
+    if (persist) {
+      schedulePersistZoom();
+    }
+  } catch (err) {
+    if (toast) showToast(`Zoom failed: ${err}`, true);
+  }
+}
+
+function stepZoom(delta) {
+  const current = clampZoomPercent(state.prefs.zoom_percent);
+  const next = clampZoomPercent(current + delta);
+  if (next === current) {
+    const edge = next <= ZOOM_MIN_PERCENT ? "Min" : "Max";
+    showToast(`Zoom: ${next}% (${edge})`);
+    return;
+  }
+  applyZoom(next, { persist: true, toast: true });
+}
+
+function resetZoom() {
+  applyZoom(ZOOM_DEFAULT_PERCENT, {
+    persist: true,
+    toast: true,
+    toastLabel: `Zoom: ${ZOOM_DEFAULT_PERCENT}% (Reset)`,
+  });
 }
 
 const modal = new ModalDialog(
@@ -162,12 +251,23 @@ const editor = new BlockEditor(
     containerEl: el.blocksContainer,
     selectionToolbarEl: document.getElementById("selection-toolbar"),
     boldBtn: document.getElementById("btn-sel-bold"),
+    italicBtn: document.getElementById("btn-sel-italic"),
     inlineCodeBtn: document.getElementById("btn-sel-code"),
     highlightBtn: document.getElementById("btn-sel-highlight"),
+    colorSelBtn: document.getElementById("btn-sel-color"),
     askAiSelBtn: document.getElementById("btn-sel-ai"),
     linkPopoverEl: document.getElementById("link-popover"),
     slashPopoverEl: document.getElementById("slash-popover"),
     blockMenuEl: document.getElementById("block-menu"),
+    blockSelectionBarEl: document.getElementById("block-selection-bar"),
+    blockSelectionCountEl: document.getElementById("block-sel-count"),
+    blocksAskAiBtn: document.getElementById("btn-blocks-ask-ai"),
+    blocksColorBtn: document.getElementById("btn-blocks-color"),
+    blocksOutdentBtn: document.getElementById("btn-blocks-outdent"),
+    blocksDupBtn: document.getElementById("btn-blocks-dup"),
+    blocksDelBtn: document.getElementById("btn-blocks-del"),
+    blocksClearBtn: document.getElementById("btn-blocks-clear"),
+    blockMarqueeEl: document.getElementById("block-marquee"),
   },
   {
     getPages: () => state.vault?.pages || [],
@@ -232,9 +332,10 @@ const editor = new BlockEditor(
       return imageCache.get(imageCacheKey(src)) || "";
     },
     onAskAiBlock: (block) => aiPanel.attachBlock(block),
-    onAskAiBlocks: (blocks) => aiPanel.attachBlocks(blocks),
+    onAskAiBlocks: (blocks) => aiPanel.focusOnHighlightedBlocks(blocks),
     onAskAiSelection: (selCtx) => aiPanel.attachSelection(selCtx),
     onCopyBlockLink: (bid) => copyBlockLink(bid),
+    onBlockSelectionChange: (blocks) => aiPanel.syncLiveSelection(blocks),
   }
 );
 
@@ -243,6 +344,13 @@ const aiPanel = new AiPanel(
     panelEl: document.getElementById("ai-panel"),
     resizerEl: document.getElementById("ai-resizer"),
     toggleBtn: el.btnToggleAi,
+    historyBtn: document.getElementById("ai-btn-history"),
+    historyDrawerEl: document.getElementById("ai-history-drawer"),
+    newChatBtn: document.getElementById("ai-btn-new-chat"),
+    historySearchEl: document.getElementById("ai-history-search"),
+    historyListEl: document.getElementById("ai-history-list"),
+    modelBadgeEl: document.getElementById("ai-model-badge"),
+    modelPopoverEl: document.getElementById("ai-model-popover"),
     settingsBtn: document.getElementById("ai-btn-settings"),
     clearBtn: document.getElementById("ai-btn-clear"),
     closeBtn: document.getElementById("ai-btn-close"),
@@ -252,9 +360,14 @@ const aiPanel = new AiPanel(
     toggleKeyVisBtn: document.getElementById("ai-toggle-key"),
     baseUrlInput: document.getElementById("ai-base-url"),
     modelInput: document.getElementById("ai-model"),
+    pickModelBtn: document.getElementById("ai-btn-pick-model"),
+    fetchModelsBtn: document.getElementById("ai-btn-fetch-models"),
     saveSettingsBtn: document.getElementById("ai-save-settings"),
+    turnRailEl: document.getElementById("ai-turn-rail"),
+    turnPreviewEl: document.getElementById("ai-turn-preview"),
     messagesEl: document.getElementById("ai-messages"),
     chipsEl: document.getElementById("ai-context-chips"),
+    mentionPopoverEl: document.getElementById("ai-mention-popover"),
     inputEl: document.getElementById("ai-input"),
     sendBtn: document.getElementById("ai-send-btn"),
     stopBtn: document.getElementById("ai-stop-btn"),
@@ -262,21 +375,54 @@ const aiPanel = new AiPanel(
   {
     invoke,
     getCurrentContext: () => ({
+      vaultPath: state.vault?.root_path || "",
       vaultName: state.vault?.root_name || "",
       pages: state.vault?.pages || [],
       currentFile: state.currentFile,
       blocks: state.currentFile ? editor.getBlocks() : [],
+      selectedBlocks: state.currentFile ? editor.getSelectedBlocksForAi() : [],
     }),
     onResizeEnd: (width) => {
       state.prefs.ai_panel_width = width;
       persistPrefs();
     },
-    onApplyEdits: (ops) => {
-      if (!state.currentFile || state.rawMode) {
-        showToast("Switch to a note in block view to apply edits", true);
-        return false;
+    onApplyEdits: async (ops, sourceFile = null) => {
+      if (sourceFile && state.currentFile !== sourceFile) {
+        const targetLower = sourceFile.toLowerCase();
+        const matchedPage = (state.vault?.pages || []).find(
+          (p) => (p.rel_path || "").toLowerCase() === targetLower
+        );
+        if (!matchedPage) {
+          showToast(`Target note "${sourceFile}" no longer exists`, true);
+          return { ok: false };
+        }
+        const confirmed = await modal.confirm({
+          title: "Switch Note to Apply Edits?",
+          description: `These edits were generated for "${matchedPage.rel_path}", while "${state.currentFile || "no note"}" is currently open. Switch to "${matchedPage.rel_path}" and apply them?`,
+          confirmLabel: "Switch & Apply",
+          danger: false,
+        });
+        if (!confirmed) {
+          return { ok: false, cancelled: true };
+        }
+        await openNote(matchedPage.rel_path);
+        if (state.currentFile !== matchedPage.rel_path) {
+          return { ok: false };
+        }
+        if (state.rawMode) {
+          state.rawMode = false;
+          updateViewVisibility();
+        }
       }
-      return editor.applyAiEdits(ops);
+      if (!state.currentFile || state.rawMode || state.graphMode) {
+        showToast("Switch to a note in block view to apply edits", true);
+        return { ok: false };
+      }
+      const res = editor.applyAiEdits(ops);
+      if (!res?.ok && res?.error) {
+        showToast(res.error, true);
+      }
+      return res;
     },
     onInsertMarkdown: async (md) => {
       if (!state.currentFile || state.rawMode) {
@@ -292,6 +438,15 @@ const aiPanel = new AiPanel(
     },
     onOpenLink: (target) => handleOpenLink(target),
     onToast: (msg, isErr) => showToast(msg, isErr),
+    onClearEditorSelection: () => editor.clearBlockSelection(),
+    onPromptRenameChat: (chat) =>
+      modal.prompt({
+        title: "Rename Conversation",
+        description: "Set a title for this AI conversation:",
+        defaultValue: chat.title || "",
+        placeholder: "Conversation title...",
+        confirmLabel: "Save",
+      }),
   }
 );
 
@@ -360,9 +515,322 @@ const graphView = new GraphView(
   }
 );
 
+const diffModal = new DiffModal(
+  {
+    backdropEl: document.getElementById("diff-modal"),
+    subtitleEl: document.getElementById("diff-modal-subtitle"),
+    statsEl: document.getElementById("diff-modal-stats"),
+    bodyEl: document.getElementById("diff-modal-body"),
+    closeBtn: document.getElementById("diff-modal-close"),
+    cancelBtn: document.getElementById("diff-btn-cancel"),
+    keepBtn: document.getElementById("diff-btn-keep"),
+    reloadBtn: document.getElementById("diff-btn-reload"),
+  },
+  {
+    onKeepMine: () => resolveConflictKeepMine(),
+    onReload: () => resolveConflictReload(),
+  }
+);
+
+async function getCurrentMineMarkdown() {
+  if (state.rawMode) {
+    return el.rawTextarea.value;
+  }
+  return invoke("serialize_blocks_to_md", { blocks: editor.getBlocks() });
+}
+
+function showConflictBanner(conflict) {
+  state.externalConflict = conflict;
+  clearTimeout(state.saveTimer);
+  state.saveTimer = null;
+  setSaveStatus("conflict");
+
+  if (conflict.kind === "deleted") {
+    el.conflictBannerText.textContent =
+      "This note was deleted on disk, but you have unsaved edits.";
+    el.btnConflictDiff.hidden = true;
+    el.btnConflictKeep.textContent = "Recreate & Save";
+    el.btnConflictKeep.className = "conflict-btn conflict-btn-primary";
+    el.btnConflictReload.textContent = "Close Note";
+    el.btnConflictReload.className = "conflict-btn conflict-btn-danger";
+    if (diffModal.isOpen()) {
+      diffModal.close();
+    }
+  } else {
+    el.conflictBannerText.textContent =
+      "Modified on disk by another program — your unsaved edits are preserved.";
+    el.btnConflictDiff.hidden = false;
+    el.btnConflictKeep.textContent = "Keep Mine";
+    el.btnConflictKeep.className = "conflict-btn";
+    el.btnConflictReload.textContent = "Reload";
+    el.btnConflictReload.className = "conflict-btn conflict-btn-primary";
+    if (diffModal.isOpen()) {
+      getCurrentMineMarkdown()
+        .then((mineText) => {
+          if (
+            diffModal.isOpen() &&
+            state.externalConflict?.kind === "modified" &&
+            state.currentFile === conflict.relPath
+          ) {
+            diffModal.update({
+              relPath: conflict.relPath,
+              mineText,
+              diskText: conflict.diskMd || "",
+            });
+          }
+        })
+        .catch(() => {});
+    }
+  }
+
+  el.conflictBanner.hidden = !state.currentFile || state.graphMode;
+}
+
+function clearConflictBanner() {
+  state.externalConflict = null;
+  el.conflictBanner.hidden = true;
+  if (diffModal.isOpen()) {
+    diffModal.close();
+  }
+}
+
+function applyHotReloadFromDisk(disk) {
+  state.lastKnownDiskHash = disk.disk_hash || null;
+  state.lastKnownMtimeMs = disk.mtime_ms ?? null;
+  state.lastKnownDiskMd = disk.raw_md ?? "";
+
+  if (state.rawMode) {
+    const ta = el.rawTextarea;
+    const wasFocused = document.activeElement === ta;
+    const scrollTop = ta.scrollTop;
+    const selStart = ta.selectionStart ?? 0;
+    const selEnd = ta.selectionEnd ?? 0;
+    ta.value = disk.raw_md ?? "";
+    if (wasFocused) {
+      const len = ta.value.length;
+      ta.setSelectionRange(Math.min(selStart, len), Math.min(selEnd, len));
+    }
+    ta.scrollTop = scrollTop;
+  } else {
+    const viewState = editor.captureViewState();
+    el.rawTextarea.value = disk.raw_md ?? "";
+    editor.hotReloadDocument(disk.blocks || [], viewState);
+    if (state.currentFile) {
+      const collapsed = editor.getCollapsedIndices();
+      const key = foldKey(state.currentFile);
+      if (collapsed.length) {
+        state.prefs.collapsed_headings[key] = collapsed;
+      } else {
+        delete state.prefs.collapsed_headings[key];
+      }
+      syncFoldButton();
+    }
+  }
+
+  renderBacklinks(disk.backlinks || []);
+}
+
+async function resolveConflictReload() {
+  const conflict = state.externalConflict;
+  if (!conflict || !state.currentFile) return;
+
+  if (conflict.kind === "deleted") {
+    clearConflictBanner();
+    state.currentFile = null;
+    state.isDirty = false;
+    state.lastKnownDiskHash = null;
+    state.lastKnownMtimeMs = null;
+    state.lastKnownDiskMd = null;
+    await handleRefreshVault();
+    updateViewVisibility();
+    showToast("Closed deleted note");
+    return;
+  }
+
+  try {
+    const disk = await invoke("check_note_on_disk", { relPath: state.currentFile });
+    if (!disk.exists) {
+      showConflictBanner({
+        kind: "deleted",
+        relPath: state.currentFile,
+        diskMd: null,
+        diskBlocks: null,
+        diskBacklinks: [],
+        diskHash: "",
+        mtimeMs: null,
+      });
+      return;
+    }
+    applyHotReloadFromDisk(disk);
+    clearConflictBanner();
+    state.isDirty = false;
+    setSaveStatus("saved");
+    showToast("Reloaded latest version from disk");
+  } catch (err) {
+    showToast(`Reload failed: ${err}`, true);
+  }
+}
+
+async function resolveConflictKeepMine() {
+  const conflict = state.externalConflict;
+  if (!conflict || !state.currentFile) return;
+  const wasDeleted = conflict.kind === "deleted";
+  state.isDirty = true;
+  const ok = await flushSave({ force: true });
+  if (!ok) return;
+  clearConflictBanner();
+  if (wasDeleted) {
+    await handleRefreshVault();
+  }
+  showToast(wasDeleted ? "Recreated note on disk" : "Kept your version and saved to disk");
+}
+
+async function openConflictDiff() {
+  if (state.externalConflict?.kind !== "modified" || !state.currentFile) return;
+  try {
+    const mineText = await getCurrentMineMarkdown();
+    diffModal.open({
+      relPath: state.currentFile,
+      mineText,
+      diskText: state.externalConflict.diskMd || "",
+    });
+  } catch (err) {
+    showToast(`Failed to compute diff: ${err}`, true);
+  }
+}
+
+async function checkActiveNoteExternalChange() {
+  if (!state.vault || !state.currentFile) return;
+  const targetRel = state.currentFile;
+
+  let disk;
+  try {
+    disk = await invoke("check_note_on_disk", { relPath: targetRel });
+  } catch {
+    return;
+  }
+  if (state.currentFile !== targetRel) return;
+
+  if (!disk.exists) {
+    if (state.isDirty) {
+      showConflictBanner({
+        kind: "deleted",
+        relPath: targetRel,
+        diskMd: null,
+        diskBlocks: null,
+        diskBacklinks: [],
+        diskHash: "",
+        mtimeMs: null,
+      });
+    } else {
+      clearConflictBanner();
+      state.currentFile = null;
+      state.lastKnownDiskHash = null;
+      state.lastKnownMtimeMs = null;
+      state.lastKnownDiskMd = null;
+      updateViewVisibility();
+      showToast("Active note was deleted on disk");
+    }
+    return;
+  }
+
+  if (state.lastKnownDiskHash && disk.disk_hash === state.lastKnownDiskHash) {
+    renderBacklinks(disk.backlinks || []);
+    if (state.externalConflict) {
+      clearConflictBanner();
+      setSaveStatus(state.isDirty ? "unsaved" : "saved");
+    }
+    return;
+  }
+
+  if (state.isDirty) {
+    showConflictBanner({
+      kind: "modified",
+      relPath: targetRel,
+      diskMd: disk.raw_md || "",
+      diskBlocks: disk.blocks || [],
+      diskBacklinks: disk.backlinks || [],
+      diskHash: disk.disk_hash,
+      mtimeMs: disk.mtime_ms ?? null,
+    });
+    return;
+  }
+
+  if (!state.rawMode && editor.isInteracting()) {
+    clearTimeout(state.deferredHotReloadTimer);
+    state.deferredHotReloadTimer = setTimeout(() => {
+      state.deferredHotReloadTimer = null;
+      checkActiveNoteExternalChange();
+    }, 250);
+    return;
+  }
+
+  clearConflictBanner();
+  applyHotReloadFromDisk(disk);
+  setSaveStatus("synced");
+}
+
+function enqueueFsChangedEvent(ev) {
+  if (!state.vault || !ev) return;
+  if (!state.pendingFsEvent) {
+    state.pendingFsEvent = {
+      tree_changed: Boolean(ev.tree_changed),
+      changes: Array.isArray(ev.changes) ? ev.changes.slice() : [],
+    };
+  } else {
+    state.pendingFsEvent.tree_changed =
+      state.pendingFsEvent.tree_changed || Boolean(ev.tree_changed);
+    if (Array.isArray(ev.changes)) {
+      state.pendingFsEvent.changes.push(...ev.changes);
+    }
+  }
+  if (!state.fsEventQueueRunning) {
+    drainFsChangedEvents();
+  }
+}
+
+async function drainFsChangedEvents() {
+  if (state.fsEventQueueRunning) return;
+  state.fsEventQueueRunning = true;
+  try {
+    while (state.pendingFsEvent) {
+      const batch = state.pendingFsEvent;
+      state.pendingFsEvent = null;
+      if (!state.vault) continue;
+
+      const hasStructuralChange =
+        batch.tree_changed ||
+        batch.changes.some((c) => c.kind === "create" || c.kind === "remove");
+
+      if (hasStructuralChange) {
+        try {
+          const snapshot = await invoke("refresh_vault");
+          await applyVaultSnapshot(snapshot, false);
+        } catch (err) {
+          console.error("Failed to refresh vault after fs change:", err);
+        }
+      }
+
+      if (state.graphMode) {
+        graphView.loadAndRender(false);
+      }
+
+      if (state.currentFile) {
+        await checkActiveNoteExternalChange();
+      }
+    }
+  } finally {
+    state.fsEventQueueRunning = false;
+  }
+}
+
 function scheduleAutoSave() {
   if (!state.currentFile) return;
   state.isDirty = true;
+  if (state.externalConflict) {
+    setSaveStatus("conflict");
+    return;
+  }
   setSaveStatus("unsaved");
   clearTimeout(state.saveTimer);
   state.saveTimer = setTimeout(() => {
@@ -370,34 +838,85 @@ function scheduleAutoSave() {
   }, 900);
 }
 
-async function flushSave() {
+async function flushSave({ force = false } = {}) {
   clearTimeout(state.saveTimer);
-  if (!state.currentFile || !state.isDirty) return;
+  state.saveTimer = null;
+  if (!state.currentFile || !state.isDirty) return true;
+  if (!force && state.externalConflict) return false;
 
   const fileToSave = state.currentFile;
+  const expectedHash = force ? null : state.lastKnownDiskHash;
   setSaveStatus("saving");
 
   try {
+    let res;
     if (state.rawMode) {
-      const payload = await invoke("save_note_raw", {
+      res = await invoke("save_note_raw", {
         relPath: fileToSave,
         rawMd: el.rawTextarea.value,
+        expectedHash,
+        force,
       });
-      if (state.currentFile === fileToSave) {
-        renderBacklinks(payload.backlinks);
-      }
     } else {
       const blocks = editor.getBlocks();
-      await invoke("save_note_blocks", {
+      res = await invoke("save_note_blocks", {
         relPath: fileToSave,
         blocks,
+        expectedHash,
+        force,
       });
     }
-    state.isDirty = false;
-    setSaveStatus("saved");
+
+    if (res?.conflict) {
+      if (state.currentFile === fileToSave) {
+        if (res.disk_deleted) {
+          showConflictBanner({
+            kind: "deleted",
+            relPath: fileToSave,
+            diskMd: null,
+            diskBlocks: null,
+            diskBacklinks: [],
+            diskHash: "",
+            mtimeMs: null,
+          });
+        } else {
+          let disk = null;
+          try {
+            disk = await invoke("check_note_on_disk", { relPath: fileToSave });
+          } catch {
+            // Fall back to raw disk payload returned by save command
+          }
+          showConflictBanner({
+            kind: "modified",
+            relPath: fileToSave,
+            diskMd: disk?.raw_md ?? res.disk_md ?? "",
+            diskBlocks: disk?.blocks ?? [],
+            diskBacklinks: disk?.backlinks ?? [],
+            diskHash: disk?.disk_hash || res.disk_hash || "",
+            mtimeMs: disk?.mtime_ms ?? res.mtime_ms ?? null,
+          });
+        }
+      }
+      return false;
+    }
+
+    if (state.currentFile === fileToSave) {
+      state.lastKnownDiskHash = res.disk_hash || state.lastKnownDiskHash;
+      state.lastKnownMtimeMs = res.mtime_ms ?? state.lastKnownMtimeMs;
+      state.lastKnownDiskMd = res.raw_md ?? state.lastKnownDiskMd;
+      if (state.rawMode && Array.isArray(res.backlinks)) {
+        renderBacklinks(res.backlinks);
+      }
+      state.isDirty = false;
+      setSaveStatus(force ? "saved" : "saved");
+    }
+    return true;
   } catch (err) {
     showToast(`Save failed: ${err}`, true);
-    setSaveStatus("unsaved");
+    if (state.currentFile === fileToSave) {
+      setSaveStatus(state.externalConflict ? "conflict" : "unsaved");
+    }
+    return false;
   }
 }
 
@@ -424,7 +943,16 @@ function updateViewVisibility() {
   el.btnToggleRaw.classList.toggle("active", state.rawMode);
   el.btnToggleGraph.classList.toggle("active", showGraph);
 
+  const bar = document.getElementById("block-selection-bar");
+  if (!hasFile || state.rawMode || showGraph) {
+    if (bar) bar.hidden = true;
+    if (!hasFile) aiPanel.syncLiveSelection([]);
+  } else {
+    editor.updateBlockSelectionBar();
+  }
+
   if (showGraph) {
+    el.conflictBanner.hidden = true;
     el.welcomeView.hidden = true;
     el.editorScroll.hidden = true;
     el.rawEditorView.hidden = true;
@@ -438,18 +966,20 @@ function updateViewVisibility() {
   graphView.setVisible(false);
 
   if (!hasFile) {
+    el.conflictBanner.hidden = true;
     el.welcomeView.hidden = false;
     el.editorScroll.hidden = true;
     el.rawEditorView.hidden = true;
     el.btnWelcomeNew.hidden = !hasVault;
     el.welcomeSubtitle.innerHTML = hasVault
       ? `Folder <strong>${escapeHtml(state.vault.root_name)}</strong> is open. Select a <code>.md</code> file or create a new note.`
-      : `Lightweight Notion-style block editor over plain <code>.md</code> folders.`;
+      : `Lightweight block-based editor over plain <code>.md</code> folders.`;
     el.breadcrumb.textContent = hasVault ? state.vault.root_name : "Skillweaver";
     setSaveStatus("saved");
     return;
   }
 
+  el.conflictBanner.hidden = !state.externalConflict;
   el.welcomeView.hidden = true;
   el.editorScroll.hidden = state.rawMode;
   el.rawEditorView.hidden = !state.rawMode;
@@ -510,20 +1040,34 @@ async function applyVaultSnapshot(snapshot, openInitial = true) {
   if (openInitial && snapshot.root_path) {
     terminal.syncCwd(snapshot.root_path);
   }
+  aiPanel.refreshHistoryView();
 }
 
 async function openNote(relPath) {
   if (!relPath) return;
+  if (state.currentFile === relPath && state.externalConflict) {
+    showToast("Resolve the disk conflict first", true);
+    return;
+  }
   if (state.currentFile && state.currentFile !== relPath) {
-    await flushSave();
+    if (state.externalConflict) {
+      showToast("Resolve the disk conflict before switching notes", true);
+      return;
+    }
+    const saved = await flushSave();
+    if (!saved) return;
   }
 
   try {
     const payload = await invoke("open_note", { relPath });
+    clearConflictBanner();
     state.currentFile = payload.rel_path;
     state.prefs.last_file = payload.rel_path;
     state.graphMode = false;
     state.isDirty = false;
+    state.lastKnownDiskHash = payload.disk_hash || null;
+    state.lastKnownMtimeMs = payload.mtime_ms ?? null;
+    state.lastKnownDiskMd = payload.raw_md ?? "";
 
     el.docTitle.textContent = payload.title;
     el.docPathHint.textContent = payload.rel_path;
@@ -542,12 +1086,21 @@ async function openNote(relPath) {
 }
 
 async function handleOpenFolder() {
-  await flushSave();
+  if (state.externalConflict) {
+    showToast("Resolve the disk conflict before opening another folder", true);
+    return;
+  }
+  const saved = await flushSave();
+  if (!saved) return;
   try {
     const snapshot = await invoke("pick_folder");
     if (snapshot) {
+      clearConflictBanner();
       imageCache.clear();
       state.currentFile = null;
+      state.lastKnownDiskHash = null;
+      state.lastKnownMtimeMs = null;
+      state.lastKnownDiskMd = null;
       state.rawMode = false;
       state.graphMode = false;
       state.prefs.last_folder = snapshot.root_path;
@@ -564,9 +1117,8 @@ async function handleRefreshVault() {
   try {
     const snapshot = await invoke("refresh_vault");
     await applyVaultSnapshot(snapshot, false);
-    if (state.currentFile && !snapshot.pages.some((p) => p.rel_path === state.currentFile)) {
-      state.currentFile = null;
-      updateViewVisibility();
+    if (state.currentFile) {
+      await checkActiveNoteExternalChange();
     }
   } catch (err) {
     showToast(`Refresh failed: ${err}`, true);
@@ -576,6 +1128,10 @@ async function handleRefreshVault() {
 async function promptCreateNote(folderRel = "") {
   if (!state.vault) {
     showToast("Open a folder first", true);
+    return;
+  }
+  if (state.externalConflict) {
+    showToast("Resolve the disk conflict first", true);
     return;
   }
   const prefix = folderRel ? `${folderRel}/` : "";
@@ -592,7 +1148,8 @@ async function promptCreateNote(folderRel = "") {
   const relPath = clean.includes("/") || !prefix ? clean : `${prefix}${clean}`;
 
   try {
-    await flushSave();
+    const saved = await flushSave();
+    if (!saved) return;
     const res = await invoke("create_note", { relPath });
     await applyVaultSnapshot(res.vault, false);
     await openNote(res.rel_path);
@@ -642,6 +1199,10 @@ async function promptCreateFolder(parentRel = "") {
 }
 
 async function promptRenameEntry(node) {
+  if (state.externalConflict) {
+    showToast("Resolve the disk conflict before renaming", true);
+    return;
+  }
   const isDir = node.is_dir;
   const currentName = isDir ? node.rel_path : node.rel_path.replace(/\.md$/i, "");
   const input = await modal.prompt({
@@ -653,7 +1214,8 @@ async function promptRenameEntry(node) {
   if (!input || !input.trim() || input.trim() === currentName) return;
 
   try {
-    await flushSave();
+    const saved = await flushSave();
+    if (!saved) return;
     const oldFoldKey = foldKey(node.rel_path);
     const res = await invoke("rename_entry", {
       oldRel: node.rel_path,
@@ -680,12 +1242,17 @@ async function promptRenameEntry(node) {
 }
 
 async function handleMoveEntry(node, targetFolder) {
+  if (state.externalConflict) {
+    showToast("Resolve the disk conflict before moving entries", true);
+    return;
+  }
   const baseName = node.name;
   const newRel = targetFolder ? `${targetFolder}/${baseName}` : baseName;
   if (newRel === node.rel_path) return;
 
   try {
-    await flushSave();
+    const saved = await flushSave();
+    if (!saved) return;
     const res = await invoke("rename_entry", {
       oldRel: node.rel_path,
       newRel,
@@ -749,8 +1316,12 @@ async function promptDeleteEntry(node) {
       (node.is_dir && state.currentFile?.startsWith(`${node.rel_path}/`));
 
     if (deletingCurrent) {
+      clearConflictBanner();
       state.currentFile = null;
       state.isDirty = false;
+      state.lastKnownDiskHash = null;
+      state.lastKnownMtimeMs = null;
+      state.lastKnownDiskMd = null;
     }
     await applyVaultSnapshot(snap, false);
     updateViewVisibility();
@@ -806,7 +1377,12 @@ async function handleOpenLink(target) {
     });
     if (!confirmed) return;
 
-    await flushSave();
+    if (state.externalConflict) {
+      showToast("Resolve the disk conflict before creating a linked note", true);
+      return;
+    }
+    const saved = await flushSave();
+    if (!saved) return;
     const res = await invoke("create_note", { relPath: cleanTarget });
     await applyVaultSnapshot(res.vault, false);
     await openNote(res.rel_path);
@@ -851,13 +1427,21 @@ async function toggleGraphMode() {
     return;
   }
   if (!state.graphMode) {
-    await flushSave();
+    if (state.externalConflict) {
+      showToast("Resolve the disk conflict first", true);
+      return;
+    }
+    const saved = await flushSave();
+    if (!saved) return;
   }
   state.graphMode = !state.graphMode;
   updateViewVisibility();
 }
 
 /* Wire UI Controls */
+el.btnConflictDiff.addEventListener("click", openConflictDiff);
+el.btnConflictKeep.addEventListener("click", resolveConflictKeepMine);
+el.btnConflictReload.addEventListener("click", resolveConflictReload);
 el.btnVaultName.addEventListener("click", handleOpenFolder);
 el.btnOpenFolder.addEventListener("click", handleOpenFolder);
 el.btnWelcomeOpen.addEventListener("click", handleOpenFolder);
@@ -885,6 +1469,7 @@ el.docTitle.addEventListener("dblclick", () => {
 });
 
 el.bottomClickZone.addEventListener("click", () => {
+  if (editor.consumeSuppressedBottomClick()) return;
   if (state.currentFile && !state.rawMode) {
     editor.focusBottomOrCreate();
   }
@@ -900,6 +1485,40 @@ el.rawTextarea.addEventListener("input", () => {
   scheduleAutoSave();
 });
 
+/* Window Zoom Shortcuts (VS Code-style, capture phase so they work everywhere) */
+window.addEventListener(
+  "keydown",
+  (e) => {
+    if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+
+    const isZoomIn =
+      e.code === "Equal" ||
+      e.code === "NumpadAdd" ||
+      e.key === "+" ||
+      e.key === "=";
+    const isZoomOut =
+      e.code === "Minus" ||
+      e.code === "NumpadSubtract" ||
+      e.key === "-" ||
+      e.key === "_";
+    const isZoomReset =
+      !e.shiftKey &&
+      (e.code === "Digit0" || e.code === "Numpad0" || e.key === "0");
+
+    if (isZoomIn) {
+      e.preventDefault();
+      stepZoom(ZOOM_STEP_PERCENT);
+    } else if (isZoomOut) {
+      e.preventDefault();
+      stepZoom(-ZOOM_STEP_PERCENT);
+    } else if (isZoomReset) {
+      e.preventDefault();
+      resetZoom();
+    }
+  },
+  true
+);
+
 /* Global Keyboard Shortcuts */
 document.addEventListener("keydown", (e) => {
   if (e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && e.key.toLowerCase() === "l") {
@@ -909,6 +1528,12 @@ document.addEventListener("keydown", (e) => {
       const bid = editor.ensureBlockId(focused.idx);
       if (bid) copyBlockLink(bid);
     }
+    return;
+  }
+
+  if (e.key === "Escape" && diffModal.isOpen()) {
+    e.preventDefault();
+    diffModal.close();
     return;
   }
 
@@ -981,7 +1606,7 @@ document.addEventListener("keydown", (e) => {
   } else if (key === "j" && !e.shiftKey) {
     e.preventDefault();
     if (editor.hasBlockSelection() && !state.rawMode && !state.graphMode) {
-      aiPanel.attachBlocks(editor.getSelectedBlocks().map((x) => x.block));
+      aiPanel.focusOnHighlightedBlocks(editor.getSelectedBlocksForAi());
       return;
     }
     const selCtx = editor.getSelectedTextContext();
@@ -998,6 +1623,10 @@ document.addEventListener("keydown", (e) => {
   } else if (key === "a" && e.shiftKey) {
     e.preventDefault();
     aiPanel.toggle();
+  } else if (key === "h" && e.shiftKey && !state.rawMode && !state.graphMode && state.currentFile) {
+    if (editor.applyLastUsedColor()) {
+      e.preventDefault();
+    }
   } else if (key === "d" && !e.shiftKey && !state.rawMode) {
     if (editor.hasBlockSelection()) {
       e.preventDefault();
@@ -1017,6 +1646,10 @@ document.addEventListener("keydown", (e) => {
     promptCreateNote("");
   } else if (key === "s" && !e.shiftKey) {
     e.preventDefault();
+    if (state.externalConflict) {
+      showToast("Resolve the disk conflict banner to save", true);
+      return;
+    }
     state.isDirty = true;
     flushSave();
   } else if ((key === "p" || key === "k") && !e.shiftKey) {
@@ -1036,7 +1669,7 @@ document.addEventListener("keydown", (e) => {
     if (state.currentFile && !state.rawMode) editor.expandAll();
   } else if (key === "z" && !state.rawMode && !quickSwitcher.isOpen()) {
     const activeTag = document.activeElement?.tagName;
-    if (activeTag === "INPUT") return;
+    if (activeTag === "INPUT" || activeTag === "TEXTAREA" || document.activeElement?.closest?.(".ai-panel")) return;
     if (e.shiftKey) {
       if (editor.redo()) e.preventDefault();
     } else if (editor.undo()) {
@@ -1044,23 +1677,40 @@ document.addEventListener("keydown", (e) => {
     }
   } else if (key === "y" && !e.shiftKey && !state.rawMode && !quickSwitcher.isOpen()) {
     const activeTag = document.activeElement?.tagName;
-    if (activeTag === "INPUT") return;
+    if (activeTag === "INPUT" || activeTag === "TEXTAREA" || document.activeElement?.closest?.(".ai-panel")) return;
     if (editor.redo()) e.preventDefault();
   }
 });
 
 window.addEventListener("beforeunload", () => {
+  if (state.zoomSaveTimer) {
+    clearTimeout(state.zoomSaveTimer);
+    state.zoomSaveTimer = null;
+    persistPrefs();
+  }
   flushSave();
 });
 
 /* Bootstrap */
 async function init() {
+  tauriListen("vault:fs-changed", (event) => {
+    enqueueFsChangedEvent(event?.payload);
+  });
+
+  window.addEventListener("focus", () => {
+    if (state.vault && state.currentFile && !state.fsEventQueueRunning) {
+      checkActiveNoteExternalChange();
+    }
+  });
+
   try {
     const startup = await invoke("get_startup_state");
     state.prefs = { ...state.prefs, ...(startup.prefs || {}) };
     if (!state.prefs.collapsed_headings) {
       state.prefs.collapsed_headings = {};
     }
+    state.prefs.zoom_percent = clampZoomPercent(state.prefs.zoom_percent);
+    applyZoom(state.prefs.zoom_percent, { persist: false, toast: false });
     applyTheme(state.prefs.theme);
     sidebar.setWidth(state.prefs.sidebar_width);
     sidebar.setCollapsed(state.prefs.sidebar_collapsed);

@@ -3,6 +3,19 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+pub const ZOOM_MIN_PERCENT: u32 = 50;
+pub const ZOOM_MAX_PERCENT: u32 = 200;
+pub const ZOOM_DEFAULT_PERCENT: u32 = 100;
+
+/// Clamps a persisted or requested zoom percentage into the supported range.
+pub fn sanitize_zoom_percent(percent: u32) -> u32 {
+    if percent == 0 {
+        ZOOM_DEFAULT_PERCENT
+    } else {
+        percent.clamp(ZOOM_MIN_PERCENT, ZOOM_MAX_PERCENT)
+    }
+}
+
 /// Persisted UI preferences stored at `%USERPROFILE%\.skillweaver\ui.prefs`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -14,6 +27,7 @@ pub struct UiPrefs {
     pub sidebar_collapsed: bool,
     pub terminal_height: u32,
     pub ai_panel_width: u32,
+    pub zoom_percent: u32,
     pub collapsed_headings: HashMap<String, Vec<usize>>,
 }
 
@@ -27,6 +41,7 @@ impl Default for UiPrefs {
             sidebar_collapsed: false,
             terminal_height: 240,
             ai_panel_width: 340,
+            zoom_percent: ZOOM_DEFAULT_PERCENT,
             collapsed_headings: HashMap::new(),
         }
     }
@@ -63,6 +78,7 @@ pub fn load_prefs_from(path: &Path) -> UiPrefs {
         prefs.sidebar_width = prefs.sidebar_width.clamp(160, 480);
         prefs.terminal_height = prefs.terminal_height.clamp(120, 600);
         prefs.ai_panel_width = prefs.ai_panel_width.clamp(260, 560);
+        prefs.zoom_percent = sanitize_zoom_percent(prefs.zoom_percent);
         prefs.last_folder = prefs
             .last_folder
             .map(|f| clean_folder_path(&f))
@@ -146,6 +162,7 @@ mod tests {
             sidebar_collapsed: true,
             terminal_height: 300,
             ai_panel_width: 360,
+            zoom_percent: 120,
             collapsed_headings: collapsed,
         };
 
@@ -189,8 +206,8 @@ mod tests {
     #[test]
     fn clean_folder_path_strips_extended_windows_prefix() {
         assert_eq!(
-            clean_folder_path(r"\\?\C:\Users\Krist\notes"),
-            r"C:\Users\Krist\notes"
+            clean_folder_path(r"\\?\C:\Users\alice\notes"),
+            r"C:\Users\alice\notes"
         );
         assert_eq!(
             clean_folder_path(r"\\?\UNC\server\share\notes"),
@@ -201,13 +218,36 @@ mod tests {
         let prefs_file = dir.join("ui.prefs");
         fs::write(
             &prefs_file,
-            r#"{"last_folder":"\\\\?\\C:\\Users\\Krist\\notes","theme":"light"}"#,
+            r#"{"last_folder":"\\\\?\\C:\\Users\\alice\\notes","theme":"light"}"#,
         )
         .unwrap();
 
         let loaded = load_prefs_from(&prefs_file);
-        assert_eq!(loaded.last_folder.as_deref(), Some(r"C:\Users\Krist\notes"));
+        assert_eq!(loaded.last_folder.as_deref(), Some(r"C:\Users\alice\notes"));
         assert_eq!(loaded.theme, "light");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn zoom_percent_defaults_and_clamps() {
+        let dir = temp_dir("zoom");
+        let prefs_file = dir.join("ui.prefs");
+
+        // Missing zoom_percent field in older ui.prefs should default to 100.
+        fs::write(&prefs_file, r#"{"theme":"dark"}"#).unwrap();
+        assert_eq!(load_prefs_from(&prefs_file).zoom_percent, ZOOM_DEFAULT_PERCENT);
+
+        // Zero resets to 100.
+        fs::write(&prefs_file, r#"{"zoom_percent":0}"#).unwrap();
+        assert_eq!(load_prefs_from(&prefs_file).zoom_percent, ZOOM_DEFAULT_PERCENT);
+
+        // Low/high out-of-range values clamp to [50, 200].
+        fs::write(&prefs_file, r#"{"zoom_percent":25}"#).unwrap();
+        assert_eq!(load_prefs_from(&prefs_file).zoom_percent, ZOOM_MIN_PERCENT);
+
+        fs::write(&prefs_file, r#"{"zoom_percent":400}"#).unwrap();
+        assert_eq!(load_prefs_from(&prefs_file).zoom_percent, ZOOM_MAX_PERCENT);
 
         let _ = fs::remove_dir_all(&dir);
     }
