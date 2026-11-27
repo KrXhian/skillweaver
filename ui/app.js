@@ -1,3 +1,17 @@
+// Copyright 2026 Blue Frog Foundation
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 import { AiPanel } from "./ai.js";
 import { DiffModal } from "./diff.js";
 import { BlockEditor } from "./editor.js";
@@ -349,6 +363,8 @@ const aiPanel = new AiPanel(
     newChatBtn: document.getElementById("ai-btn-new-chat"),
     historySearchEl: document.getElementById("ai-history-search"),
     historyListEl: document.getElementById("ai-history-list"),
+    skillsBtn: document.getElementById("ai-btn-skills"),
+    skillsDrawerEl: document.getElementById("ai-skills-drawer"),
     modelBadgeEl: document.getElementById("ai-model-badge"),
     modelPopoverEl: document.getElementById("ai-model-popover"),
     settingsBtn: document.getElementById("ai-btn-settings"),
@@ -437,6 +453,23 @@ const aiPanel = new AiPanel(
       }
     },
     onOpenLink: (target) => handleOpenLink(target),
+    onOpenRawFile: async (relPath) => {
+      await openNote(relPath);
+      if (state.currentFile === relPath && !state.rawMode) {
+        await toggleRawMode();
+      }
+    },
+    onVaultChanged: () => handleRefreshVault(),
+    onConfirmDeleteSkill: (skill) =>
+      modal.confirm({
+        title: `Delete Skill @${skill.slug}?`,
+        description:
+          skill.scope === "vault"
+            ? `Delete "${skill.rel_path || `skills/${skill.slug}/SKILL.md`}" from this folder?`
+            : `Delete global skill "@${skill.slug}" from ~/.skillweaver/skills/?`,
+        confirmLabel: "Delete",
+        danger: true,
+      }),
     onToast: (msg, isErr) => showToast(msg, isErr),
     onClearEditorSelection: () => editor.clearBlockSelection(),
     onPromptRenameChat: (chat) =>
@@ -811,6 +844,13 @@ async function drainFsChangedEvents() {
         }
       }
 
+      const touchedSkills = batch.changes.some((c) =>
+        /^skills(?:\/|$)/i.test(String(c.rel_path || ""))
+      );
+      if (touchedSkills) {
+        aiPanel.refreshSkills();
+      }
+
       if (state.graphMode) {
         graphView.loadAndRender(false);
       }
@@ -1040,6 +1080,7 @@ async function applyVaultSnapshot(snapshot, openInitial = true) {
   if (openInitial && snapshot.root_path) {
     terminal.syncCwd(snapshot.root_path);
   }
+  aiPanel.refreshSkills();
   aiPanel.refreshHistoryView();
 }
 

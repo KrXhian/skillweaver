@@ -1,3 +1,17 @@
+// Copyright 2026 Blue Frog Foundation
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 import { compactAssistantHistoryContent } from "./edits.js";
 
 export const STATIC_SYSTEM_PROMPT = `You are Skillweaver AI, the built-in assistant for Skillweaver™ — created by the Blue Frog Foundation as a lightweight, local-first block-based Markdown workspace over plain Markdown folders.
@@ -12,7 +26,7 @@ Skillweaver Product Guide (answer user navigation/feature questions accurately f
 - Keyboard Shortcuts: \`Ctrl+O\` Open Folder · \`Ctrl+N\` New Note · \`Ctrl+P\` / \`Ctrl+K\` Quick Switcher · \`Ctrl+S\` Save now · \`Ctrl+B\` Bold · \`Ctrl+I\` Italic · \`Ctrl+E\` Inline Code · \`Ctrl+Shift+H\` Repeat last block/inline color · \`Ctrl+J\` Ask AI on selection/block (or toggle drawer) · \`Alt+Shift+L\` Copy \`[[page#^id]]\` anchor link · \`Ctrl+D\` Duplicate block(s) · \`Ctrl+Click\` / \`Shift+Click\` Multi-block select · \`Shift+Tab\` / \`Tab\` Outdent block from heading / re-indent · \`Ctrl+Shift+[\` / \`]\` Collapse / Expand all headings · \`Ctrl+\\\` Toggle sidebar · \`Ctrl+G\` Knowledge Graph · \`Ctrl+Shift+M\` Raw Markdown · \`Ctrl+~\` Terminal · \`Ctrl+=\` / \`Ctrl+-\` / \`Ctrl+0\` Zoom window.
 - Block Triggers & Slash Menu: Type \`/\` in an empty text block (or use \`⋮⋮\` → Turn into) for Headings (\`#\`, \`##\`, \`###\`), Bullet List (\`- \`), Numbered List (\`1. \`), To-do Checklist (\`- [ ] \` / \`[] \`), Quote (\`> \`), Divider (\`---\`), Code Block (\`\`\`\` \`\`\`lang \`\`\`\`), and Table (\`/table\` or \`| A | B |\`). Paste screenshots directly (\`Ctrl+V\`) to save into \`<folder>/assets/\`.
 - Linking & Knowledge Graph: Type \`@@\` in the editor to link pages (\`[[path]]\`); incoming backlinks appear at the bottom of target notes. In Knowledge Graph (\`Ctrl+G\`), toggle Local 1-hop or Orphans, filter, drag/zoom nodes, or click unresolved dashed nodes to create pages.
-- AI Drawer Workflows: Type \`@@\` in the AI composer to attach inline page chips (**Current page** pinned first, others searchable); highlight blocks or click \`⋮⋮\` → **Ask AI**; toggle **Search Folder** for cross-note search; switch/configure BYOK providers (OpenAI, Gemini, Anthropic, OpenRouter, Ollama, Custom) in the Settings drawer (stored in \`%USERPROFILE%\\.skillweaver\\ai.prefs\`; UI prefs in \`%USERPROFILE%\\.skillweaver\\ui.prefs\`).
+- AI Drawer Workflows: Type \`@@\` in the AI composer to attach inline page chips (**Current page** pinned first, others searchable); type \`@\` to inject a saved AI skill for the current turn or pin skills on the conversation bar for the whole chat; open the **Skills** drawer to create, edit, or harvest reusable \`SKILL.md\` skills stored in \`<folder>/skills/\` or \`~/.skillweaver/skills/\`; highlight blocks or click \`⋮⋮\` → **Ask AI**; toggle **Search Folder** for cross-note search; configure BYOK providers (OpenAI, Gemini, Anthropic, OpenRouter, Ollama, Custom) in Settings (encrypted via Windows DPAPI in \`%USERPROFILE%\\.skillweaver\\ai.prefs\`; UI prefs in \`%USERPROFILE%\\.skillweaver\\ui.prefs\`).
 - Built-in MCP Server: External agents (Claude Code, Cursor, Codex, etc.) can launch \`skillweaver.exe --mcp "<vault_folder>"\` over stdio to query/search/read/create notes and resolve \`^block-id\` anchors.
 
 Skillweaver Markdown & Block Syntax:
@@ -20,8 +34,22 @@ Skillweaver Markdown & Block Syntax:
 - Inline formatting: \`**bold**\`, \`*italic*\`, \`\\\`inline code\\\`\`, \`==highlight==\`, \`<span data-color="COLOR" data-bg="COLOR">text</span>\` (allowed colors: \`gray\`, \`brown\`, \`orange\`, \`yellow\`, \`green\`, \`blue\`, \`purple\`, \`pink\`, \`red\`), and \`[[relative/path]]\` or \`[[relative/path#^block_id]]\` wikilinks. Do NOT use raw HTML tags like \`<br>\`, \`<p>\`, \`<ul>\`, or \`<li>\`.
 - Line breaks inside JSON \`paragraph\` or \`quote\` content or \`table\` cells MUST use \`\\n\` (never \`<br>\`). For lists/checklists, prefer \`bullet_list\`, \`numbered_list\`, or \`todo\` blocks via \`skillweaver-edits\`.
 
+Skills & Skill Creation Rules:
+- When ACTIVE PINNED SKILLS or ACTIVE SKILLS INVOKED FOR THIS TURN are provided in context, follow their rules, structure, tone, and checklists carefully.
+- ONLY when the user explicitly asks to create, draft, refine, or harvest a reusable skill, include ONE fenced JSON block tagged \`\`\`skillweaver-skill:
+\`\`\`skillweaver-skill
+{
+  "slug": "my-skill-slug",
+  "name": "My Skill Name",
+  "description": "Concise one-line description of when and how to use this skill",
+  "scope": "vault",
+  "body": "# Purpose\n...\n\n# Rules\n- ..."
+}
+\`\`\`
+- Use \`"scope": "vault"\` for project/story/folder-specific skills and \`"scope": "global"\` for general cross-vault workflows. Keep normal explanations outside the fence; do NOT emit \`\`\`skillweaver-skill for normal Q&A or regular page edits.
+
 Capabilities & Rules:
-- You can read the user's current page blocks (each tagged with [block_id]), highlighted snippets, [[wikilinks]] / @@mentions, and relevant notes across their opened folder.
+- You can read the user's current page blocks (each tagged with [block_id]), highlighted snippets, [[wikilinks]] / @@mentions, @skills, and relevant notes across their opened folder.
 - If a PRIMARY FOCUS section is present, prioritize addressing those exact highlighted blocks and target only their block_ids when proposing edits unless the user asks to edit elsewhere.
 - Existing block \`color\`, \`bg\`, and \`outdent\` are preserved automatically on \`replace\` unless explicitly changed.
 - When citing another note or block, use [[relative/path]] or [[relative/path#^block_id]] when known.
@@ -35,6 +63,22 @@ Capabilities & Rules:
 ]
 \`\`\`
 - Use the exact runtime or ^block_id shown in brackets (e.g. "b-2" or "^abc123"). Keep normal explanations outside the \`\`\`skillweaver-edits block. Do NOT emit \`\`\`skillweaver-edits for pure Q&A.`;
+
+export function extractSkillMentionsFromPrompt(userPrompt) {
+  const src = String(userPrompt || "");
+  const slugs = [];
+  const seen = new Set();
+  const regex = /(?:^|[\s(\[])@([a-zA-Z0-9][a-zA-Z0-9_-]{0,63})(?=$|[\s.,!?;:)\]])/g;
+  let match;
+  while ((match = regex.exec(src)) !== null) {
+    const slug = match[1].toLowerCase();
+    if (!seen.has(slug)) {
+      seen.add(slug);
+      slugs.push(slug);
+    }
+  }
+  return slugs;
+}
 
 export function formatBlockForAi(block, idx) {
   const bid = block.block_id ? `^${block.block_id}` : block.id;
@@ -82,9 +126,19 @@ export function formatBlockForAi(block, idx) {
 export function getContextBudgets(provider) {
   const p = String(provider || "").trim().toLowerCase();
   if (p === "ollama" || p === "custom") {
-    return { maxPageChars: 12000, maxDynamicChars: 6000, maxHistoryChars: 8000 };
+    return {
+      maxPageChars: 12000,
+      maxDynamicChars: 6000,
+      maxHistoryChars: 8000,
+      maxPinnedSkillChars: 4500,
+    };
   }
-  return { maxPageChars: 28000, maxDynamicChars: 12000, maxHistoryChars: 16000 };
+  return {
+    maxPageChars: 28000,
+    maxDynamicChars: 12000,
+    maxHistoryChars: 16000,
+    maxPinnedSkillChars: 10000,
+  };
 }
 
 export function getBlockIdSet(blocks) {
@@ -201,6 +255,46 @@ export function formatPageWithBudget(blocks, maxChars, focusedIdsSet) {
   };
 }
 
+async function formatSkillWithLinkedContext(
+  skill,
+  { ctx, invoke, includeCurrentPage, alreadyResolvedSet, maxChars }
+) {
+  const header = `Skill @${skill.slug} (${skill.scope})${skill.description ? ` — ${skill.description}` : ""}:`;
+  let out = `${header}\n${skill.body || ""}`;
+
+  if (ctx.vaultName && Array.isArray(skill.linked_refs) && skill.linked_refs.length > 0 && out.length < maxChars - 160) {
+    const refParts = [];
+    for (const ref of skill.linked_refs.slice(0, 3)) {
+      const key = String(ref || "").toLowerCase();
+      if (!key || alreadyResolvedSet.has(key)) continue;
+      try {
+        const res = await invoke("resolve_block_reference", {
+          currentRel: skill.rel_path || ctx.currentFile,
+          targetRef: ref,
+        });
+        if (!res) continue;
+        if (includeCurrentPage && ctx.currentFile && res.rel_path === ctx.currentFile && !res.anchor) {
+          alreadyResolvedSet.add(key);
+          continue;
+        }
+        alreadyResolvedSet.add(key);
+        const label = res.anchor ? `${res.rel_path}#${res.anchor}` : res.rel_path;
+        refParts.push(`Linked context from [[${label}]]:\n${res.content}`);
+      } catch {
+        // Ignore unresolved skill wikilink
+      }
+    }
+    if (refParts.length > 0) {
+      out += `\n\n${refParts.join("\n\n")}`;
+    }
+  }
+
+  if (out.length > maxChars && maxChars > 80) {
+    out = `${out.slice(0, maxChars - 24)}\n… [truncated for budget]`;
+  }
+  return out;
+}
+
 export async function buildContextPayload({
   ctx,
   userPrompt,
@@ -209,6 +303,8 @@ export async function buildContextPayload({
   searchFolder,
   liveSelectedBlocks,
   pinnedAttachments,
+  skills = [],
+  pinnedSkillIds = [],
   invoke,
 }) {
   const budgets = getContextBudgets(provider);
@@ -221,6 +317,55 @@ export async function buildContextPayload({
       .map((p) => p.rel_path)
       .join(", ");
     stableSections.push(`Active folder: "${ctx.vaultName}". Notes: ${pageList || "(none)"}`);
+  }
+
+  const skillById = new Map();
+  const skillBySlug = new Map();
+  for (const s of skills || []) {
+    if (!s || !s.id || !s.slug) continue;
+    skillById.set(s.id, s);
+    const slugKey = s.slug.toLowerCase();
+    // skills is already vault-first, so keep the first matching slug ("vault" overrides "global")
+    if (!skillBySlug.has(slugKey)) {
+      skillBySlug.set(slugKey, s);
+    }
+  }
+
+  if ((skills || []).length > 0) {
+    const indexLines = (skills || []).slice(0, 40).map((s) => {
+      const desc = s.description ? `: ${s.description}` : "";
+      return `- @${s.slug} (${s.scope})${desc}`;
+    });
+    stableSections.push(`Available Skills (invoke with @slug):\n${indexLines.join("\n")}`);
+  }
+
+  const alreadyIncludedSkillIds = new Set();
+  const resolvedSkillRefs = new Set();
+  const pinnedSkillBlocks = [];
+  let pinnedSkillChars = 0;
+
+  for (const skillId of pinnedSkillIds || []) {
+    const skill = skillById.get(skillId);
+    if (!skill || alreadyIncludedSkillIds.has(skill.id)) continue;
+    const remaining = budgets.maxPinnedSkillChars - pinnedSkillChars;
+    if (remaining < 160 && pinnedSkillBlocks.length > 0) break;
+
+    const formatted = await formatSkillWithLinkedContext(skill, {
+      ctx,
+      invoke,
+      includeCurrentPage,
+      alreadyResolvedSet: resolvedSkillRefs,
+      maxChars: Math.max(remaining, 600),
+    });
+    pinnedSkillBlocks.push(formatted);
+    pinnedSkillChars += formatted.length + 2;
+    alreadyIncludedSkillIds.add(skill.id);
+  }
+
+  if (pinnedSkillBlocks.length > 0) {
+    stableSections.push(
+      `ACTIVE PINNED SKILLS (apply on every turn unless overridden):\n\n${pinnedSkillBlocks.join("\n\n---\n\n")}`
+    );
   }
 
   const highlighted = ctx.selectedBlocks?.length ? ctx.selectedBlocks : liveSelectedBlocks;
@@ -251,6 +396,30 @@ export async function buildContextPayload({
     dynamicChars += toAdd.length + 18;
     return true;
   };
+
+  // One-turn @skill mentions (excluding skills already pinned in stable context)
+  const invokedSlugs = extractSkillMentionsFromPrompt(userPrompt);
+  const invokedSkillBlocks = [];
+  for (const slug of invokedSlugs) {
+    const skill = skillBySlug.get(slug);
+    if (!skill || alreadyIncludedSkillIds.has(skill.id)) continue;
+    alreadyIncludedSkillIds.add(skill.id);
+    const remaining = Math.max(600, budgets.maxDynamicChars - dynamicChars);
+    const formatted = await formatSkillWithLinkedContext(skill, {
+      ctx,
+      invoke,
+      includeCurrentPage,
+      alreadyResolvedSet: resolvedSkillRefs,
+      maxChars: Math.min(remaining, budgets.maxPinnedSkillChars),
+    });
+    invokedSkillBlocks.push(formatted);
+  }
+  if (invokedSkillBlocks.length > 0) {
+    pushDynamic(
+      `ACTIVE SKILLS INVOKED FOR THIS TURN:\n\n${invokedSkillBlocks.join("\n\n---\n\n")}`,
+      true
+    );
+  }
 
   if (highlighted.length > 0) {
     const notIncluded = [];

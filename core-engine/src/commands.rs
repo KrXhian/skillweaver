@@ -1,12 +1,28 @@
+// Copyright 2026 Blue Frog Foundation
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use crate::ai::{
     self, AiChatRequest, AiChatSession, AiChatSummary, AiListModelsRequest, AiPrefs, AiState,
-    CachedModelList, ModelsCache,
+    CachedModelList, ModelsCache, SaveSkillRequest, SkillEntry,
 };
 use crate::markdown::{self, Block};
 use crate::prefs::{self, UiPrefs};
 use crate::terminal::{TerminalStartPayload, TerminalState};
-use crate::vault::{self, BacklinkEntry, ResolvedBlockRef, VaultGraph, VaultSearchHit, VaultSnapshot};
-use crate::watcher::VaultWatcherState;
+use crate::vault::{
+    self, BacklinkEntry, ResolvedBlockRef, VaultGraph, VaultSearchHit, VaultSnapshot,
+};
+use crate::watcher::{SelfWriteKind, VaultWatcherState};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -146,7 +162,7 @@ fn open_folder_internal(
     Ok(snapshot)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_startup_state(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -190,11 +206,7 @@ pub async fn pick_folder(
     state: State<'_, AppState>,
     watcher: State<'_, VaultWatcherState>,
 ) -> Result<Option<VaultSnapshot>, String> {
-    let current = state
-        .vault_root
-        .lock()
-        .ok()
-        .and_then(|g| g.clone());
+    let current = state.vault_root.lock().ok().and_then(|g| g.clone());
 
     let picked = tauri::async_runtime::spawn_blocking(move || {
         let mut dialog = rfd::FileDialog::new().set_title("Open Markdown Folder");
@@ -216,7 +228,7 @@ pub async fn pick_folder(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_folder(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -226,7 +238,7 @@ pub fn open_folder(
     open_folder_internal(&app, &state, &watcher, Path::new(&folder_path), None)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn refresh_vault(
     state: State<'_, AppState>,
     watcher: State<'_, VaultWatcherState>,
@@ -236,7 +248,7 @@ pub fn refresh_vault(
     vault::snapshot_vault(&root, None)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_note(state: State<'_, AppState>, rel_path: String) -> Result<NotePayload, String> {
     let root = active_root(&state)?;
     let norm = vault::normalize_rel_path(&rel_path)?;
@@ -250,7 +262,7 @@ pub fn open_note(state: State<'_, AppState>, rel_path: String) -> Result<NotePay
     build_note_payload(&root, &norm, raw_md)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn check_note_on_disk(
     state: State<'_, AppState>,
     rel_path: String,
@@ -297,13 +309,19 @@ enum SaveConflictCheck {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SaveConflictMode {
+    Check,
+    ForceOverwrite,
+}
+
 fn check_disk_before_save(
     root: &Path,
     norm_rel: &str,
     expected_hash: Option<&str>,
-    force: bool,
+    conflict_mode: SaveConflictMode,
 ) -> Result<SaveConflictCheck, String> {
-    if force {
+    if conflict_mode == SaveConflictMode::ForceOverwrite {
         return Ok(SaveConflictCheck::Proceed);
     }
     let Some(expected) = expected_hash else {
@@ -326,7 +344,7 @@ fn check_disk_before_save(
     Ok(SaveConflictCheck::Proceed)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_note_blocks(
     state: State<'_, AppState>,
     watcher: State<'_, VaultWatcherState>,
@@ -338,13 +356,13 @@ pub fn save_note_blocks(
     let root = active_root(&state)?;
     let norm = vault::normalize_rel_path(&rel_path)?;
     let raw_md = markdown::serialize_markdown(&blocks);
+    let conflict_mode = if force.unwrap_or(false) {
+        SaveConflictMode::ForceOverwrite
+    } else {
+        SaveConflictMode::Check
+    };
 
-    match check_disk_before_save(
-        &root,
-        &norm,
-        expected_hash.as_deref(),
-        force.unwrap_or(false),
-    )? {
+    match check_disk_before_save(&root, &norm, expected_hash.as_deref(), conflict_mode)? {
         SaveConflictCheck::Proceed => {}
         SaveConflictCheck::DeletedOnDisk => {
             return Ok(SavePayload {
@@ -373,9 +391,9 @@ pub fn save_note_blocks(
     }
 
     let new_hash = vault::content_hash(&raw_md);
-    watcher.record_self_write(&norm, Some(new_hash.clone()), false);
+    watcher.record_self_write(&norm, SelfWriteKind::ContentHash(new_hash.clone()));
     vault::write_note(&root, &norm, &raw_md)?;
-    watcher.record_self_write(&norm, Some(new_hash.clone()), false);
+    watcher.record_self_write(&norm, SelfWriteKind::ContentHash(new_hash.clone()));
     let mtime_ms = vault::read_note_mtime_ms(&root, &norm);
 
     Ok(SavePayload {
@@ -388,7 +406,7 @@ pub fn save_note_blocks(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_note_raw(
     state: State<'_, AppState>,
     watcher: State<'_, VaultWatcherState>,
@@ -399,13 +417,13 @@ pub fn save_note_raw(
 ) -> Result<SaveRawPayload, String> {
     let root = active_root(&state)?;
     let norm = vault::normalize_rel_path(&rel_path)?;
+    let conflict_mode = if force.unwrap_or(false) {
+        SaveConflictMode::ForceOverwrite
+    } else {
+        SaveConflictMode::Check
+    };
 
-    match check_disk_before_save(
-        &root,
-        &norm,
-        expected_hash.as_deref(),
-        force.unwrap_or(false),
-    )? {
+    match check_disk_before_save(&root, &norm, expected_hash.as_deref(), conflict_mode)? {
         SaveConflictCheck::Proceed => {}
         SaveConflictCheck::DeletedOnDisk => {
             return Ok(SaveRawPayload {
@@ -438,9 +456,9 @@ pub fn save_note_raw(
     }
 
     let new_hash = vault::content_hash(&raw_md);
-    watcher.record_self_write(&norm, Some(new_hash.clone()), false);
+    watcher.record_self_write(&norm, SelfWriteKind::ContentHash(new_hash.clone()));
     vault::write_note(&root, &norm, &raw_md)?;
-    watcher.record_self_write(&norm, Some(new_hash.clone()), false);
+    watcher.record_self_write(&norm, SelfWriteKind::ContentHash(new_hash.clone()));
     let mtime_ms = vault::read_note_mtime_ms(&root, &norm);
     let backlinks = vault::find_backlinks(&root, &norm).unwrap_or_default();
 
@@ -466,7 +484,7 @@ pub fn serialize_blocks_to_md(blocks: Vec<Block>) -> String {
     markdown::serialize_markdown(&blocks)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_note(
     state: State<'_, AppState>,
     watcher: State<'_, VaultWatcherState>,
@@ -475,7 +493,7 @@ pub fn create_note(
     let root = active_root(&state)?;
     let empty_hash = vault::content_hash("");
     let created = vault::create_note(&root, &rel_path)?;
-    watcher.record_self_write(&created, Some(empty_hash), false);
+    watcher.record_self_write(&created, SelfWriteKind::ContentHash(empty_hash));
     watcher.sync_known_vault(&root);
     let snap = vault::snapshot_vault(&root, Some(&created))?;
     Ok(CreateResult {
@@ -484,7 +502,7 @@ pub fn create_note(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_folder(
     state: State<'_, AppState>,
     watcher: State<'_, VaultWatcherState>,
@@ -492,12 +510,12 @@ pub fn create_folder(
 ) -> Result<VaultSnapshot, String> {
     let root = active_root(&state)?;
     let norm = vault::create_folder(&root, &rel_path)?;
-    watcher.record_self_write(&norm, None, false);
+    watcher.record_self_write(&norm, SelfWriteKind::StructuralCreateOrUpdate);
     watcher.sync_known_vault(&root);
     vault::snapshot_vault(&root, None)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn rename_entry(
     state: State<'_, AppState>,
     watcher: State<'_, VaultWatcherState>,
@@ -506,22 +524,28 @@ pub fn rename_entry(
 ) -> Result<RenameResult, String> {
     let root = active_root(&state)?;
     if let Ok(old_norm) = vault::normalize_rel_path(&old_rel) {
-        watcher.record_self_write(&old_norm, None, true);
+        watcher.record_self_write(&old_norm, SelfWriteKind::Delete);
     }
-    let (new_norm, rewritten) = vault::rename_entry_tracked(&root, &old_rel, &new_rel)?;
-    watcher.record_self_write(&new_norm, None, false);
-    for (rewritten_rel, rewritten_hash) in rewritten {
-        watcher.record_self_write(&rewritten_rel, Some(rewritten_hash), false);
+    let outcome = vault::rename_entry_tracked(&root, &old_rel, &new_rel)?;
+    watcher.record_self_write(
+        &outcome.new_rel_path,
+        SelfWriteKind::StructuralCreateOrUpdate,
+    );
+    for item in outcome.rewritten_notes {
+        watcher.record_self_write(
+            &item.rel_path,
+            SelfWriteKind::ContentHash(item.content_hash),
+        );
     }
     watcher.sync_known_vault(&root);
     let snap = vault::snapshot_vault(&root, None)?;
     Ok(RenameResult {
-        new_rel: new_norm,
+        new_rel: outcome.new_rel_path,
         vault: snap,
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_entry(
     state: State<'_, AppState>,
     watcher: State<'_, VaultWatcherState>,
@@ -529,14 +553,14 @@ pub fn delete_entry(
 ) -> Result<VaultSnapshot, String> {
     let root = active_root(&state)?;
     if let Ok(norm) = vault::normalize_rel_path(&rel_path) {
-        watcher.record_self_write(&norm, None, true);
+        watcher.record_self_write(&norm, SelfWriteKind::Delete);
     }
     vault::delete_entry(&root, &rel_path)?;
     watcher.sync_known_vault(&root);
     vault::snapshot_vault(&root, None)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn resolve_link(
     state: State<'_, AppState>,
     current_rel: Option<String>,
@@ -569,10 +593,7 @@ pub fn save_ui_prefs(state: State<'_, AppState>, mut prefs: UiPrefs) -> Result<(
 }
 
 #[tauri::command]
-pub fn set_window_zoom(
-    webview: tauri::WebviewWindow,
-    zoom_percent: u32,
-) -> Result<u32, String> {
+pub fn set_window_zoom(webview: tauri::WebviewWindow, zoom_percent: u32) -> Result<u32, String> {
     let clamped = prefs::sanitize_zoom_percent(zoom_percent);
     let factor = (clamped as f64) / 100.0;
     webview
@@ -581,18 +602,21 @@ pub fn set_window_zoom(
     Ok(clamped)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_pasted_image(
     state: State<'_, AppState>,
     current_rel: Option<String>,
     data_url: String,
 ) -> Result<SavedImagePayload, String> {
     let root = active_root(&state)?;
-    let (src, data_url) = vault::save_pasted_image(&root, current_rel.as_deref(), &data_url)?;
-    Ok(SavedImagePayload { src, data_url })
+    let saved = vault::save_pasted_image(&root, current_rel.as_deref(), &data_url)?;
+    Ok(SavedImagePayload {
+        src: saved.markdown_src,
+        data_url: saved.data_url,
+    })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn read_image_data_url(
     state: State<'_, AppState>,
     current_rel: Option<String>,
@@ -623,7 +647,7 @@ pub fn terminal_run(
     term_state.run_input(&app, fallback.as_deref(), &input)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn terminal_interrupt(
     app: AppHandle,
     app_state: State<'_, AppState>,
@@ -666,7 +690,7 @@ pub fn ai_chat_stream(
     ai_state: State<'_, AiState>,
     request: AiChatRequest,
 ) -> Result<(), String> {
-    ai::start_chat_stream(app, &ai_state, request)
+    ai::start_chat_stream(app, &ai_state, &request)
 }
 
 #[tauri::command]
@@ -692,17 +716,17 @@ pub fn ai_list_chats() -> Vec<AiChatSummary> {
     ai::list_chats()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn ai_load_chat(chat_id: String) -> Result<AiChatSession, String> {
     ai::load_chat(&chat_id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn ai_save_chat(session: AiChatSession) -> Result<Vec<AiChatSummary>, String> {
     ai::save_chat(&session)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn ai_update_chat_meta(
     chat_id: String,
     title: Option<String>,
@@ -711,12 +735,87 @@ pub fn ai_update_chat_meta(
     ai::update_chat_meta(&chat_id, title, pinned)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn ai_delete_chat(chat_id: String) -> Result<Vec<AiChatSummary>, String> {
     ai::delete_chat(&chat_id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
+pub fn ai_list_skills(state: State<'_, AppState>) -> Vec<SkillEntry> {
+    let root = state.vault_root.lock().ok().and_then(|g| g.clone());
+    ai::list_skills(root.as_deref())
+}
+
+#[tauri::command(async)]
+pub fn ai_save_skill(
+    state: State<'_, AppState>,
+    watcher: State<'_, VaultWatcherState>,
+    request: SaveSkillRequest,
+) -> Result<SkillEntry, String> {
+    let root = state.vault_root.lock().ok().and_then(|g| g.clone());
+
+    if let (Some(ref r), Some(orig_id)) = (&root, request.original_id.as_deref()) {
+        if orig_id.starts_with("vault:") {
+            if let Some(existing) = ai::list_skills(Some(r.as_path()))
+                .into_iter()
+                .find(|s| s.id == orig_id)
+            {
+                if let Some(old_rel) = existing.rel_path {
+                    watcher.record_self_write(&old_rel, SelfWriteKind::Delete);
+                }
+            }
+        }
+    }
+
+    let saved = ai::save_skill(root.as_deref(), &request)?;
+    if let (Some(ref r), Some(ref rel)) = (&root, &saved.rel_path) {
+        watcher.record_self_write("skills", SelfWriteKind::StructuralCreateOrUpdate);
+        watcher.record_self_write(
+            &format!("skills/{}", saved.slug),
+            SelfWriteKind::StructuralCreateOrUpdate,
+        );
+        let kind = vault::read_note(r, rel)
+            .ok()
+            .map(|c| SelfWriteKind::ContentHash(vault::content_hash(&c)))
+            .unwrap_or(SelfWriteKind::StructuralCreateOrUpdate);
+        watcher.record_self_write(rel, kind);
+        watcher.sync_known_vault(r);
+    }
+
+    Ok(saved)
+}
+
+#[tauri::command(async)]
+pub fn ai_delete_skill(
+    state: State<'_, AppState>,
+    watcher: State<'_, VaultWatcherState>,
+    skill_id: String,
+) -> Result<Vec<SkillEntry>, String> {
+    let root = state.vault_root.lock().ok().and_then(|g| g.clone());
+
+    if let Some(ref r) = root {
+        if skill_id.starts_with("vault:") {
+            if let Some(existing) = ai::list_skills(Some(r.as_path()))
+                .into_iter()
+                .find(|s| s.id == skill_id)
+            {
+                if let Some(old_rel) = existing.rel_path {
+                    watcher.record_self_write(&old_rel, SelfWriteKind::Delete);
+                }
+            }
+        }
+    }
+
+    let removed_rel = ai::delete_skill(root.as_deref(), &skill_id)?;
+    if let (Some(ref r), Some(ref rel)) = (&root, &removed_rel) {
+        watcher.record_self_write(rel, SelfWriteKind::Delete);
+        watcher.sync_known_vault(r);
+    }
+
+    Ok(ai::list_skills(root.as_deref()))
+}
+
+#[tauri::command(async)]
 pub fn search_vault(
     state: State<'_, AppState>,
     query: String,
@@ -724,10 +823,15 @@ pub fn search_vault(
     max_files: Option<usize>,
 ) -> Result<Vec<VaultSearchHit>, String> {
     let root = active_root(&state)?;
-    vault::search_vault(&root, &query, exclude_rel.as_deref(), max_files.unwrap_or(5))
+    vault::search_vault(
+        &root,
+        &query,
+        exclude_rel.as_deref(),
+        max_files.unwrap_or(5),
+    )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn resolve_block_reference(
     state: State<'_, AppState>,
     current_rel: Option<String>,
@@ -737,7 +841,7 @@ pub fn resolve_block_reference(
     vault::resolve_block_reference(&root, current_rel.as_deref(), &target_ref)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_vault_graph(state: State<'_, AppState>) -> Result<VaultGraph, String> {
     let root = active_root(&state)?;
     vault::build_vault_graph(&root)
@@ -767,12 +871,25 @@ mod tests {
         let initial_hash = vault::content_hash("initial");
 
         assert!(matches!(
-            check_disk_before_save(&root, "note.md", Some(&initial_hash), false).unwrap(),
+            check_disk_before_save(
+                &root,
+                "note.md",
+                Some(&initial_hash),
+                SaveConflictMode::Check
+            )
+            .unwrap(),
             SaveConflictCheck::Proceed
         ));
 
         vault::write_note(&root, "note.md", "external edit").unwrap();
-        match check_disk_before_save(&root, "note.md", Some(&initial_hash), false).unwrap() {
+        match check_disk_before_save(
+            &root,
+            "note.md",
+            Some(&initial_hash),
+            SaveConflictMode::Check,
+        )
+        .unwrap()
+        {
             SaveConflictCheck::ModifiedOnDisk {
                 disk_md, disk_hash, ..
             } => {
@@ -783,13 +900,25 @@ mod tests {
         }
 
         assert!(matches!(
-            check_disk_before_save(&root, "note.md", Some(&initial_hash), true).unwrap(),
+            check_disk_before_save(
+                &root,
+                "note.md",
+                Some(&initial_hash),
+                SaveConflictMode::ForceOverwrite
+            )
+            .unwrap(),
             SaveConflictCheck::Proceed
         ));
 
         vault::delete_entry(&root, "note.md").unwrap();
         assert!(matches!(
-            check_disk_before_save(&root, "note.md", Some(&initial_hash), false).unwrap(),
+            check_disk_before_save(
+                &root,
+                "note.md",
+                Some(&initial_hash),
+                SaveConflictMode::Check
+            )
+            .unwrap(),
             SaveConflictCheck::DeletedOnDisk
         ));
 

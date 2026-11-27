@@ -14,11 +14,19 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: core-engine -> target
+
+      - name: Check formatting
+        run: cargo fmt --manifest-path core-engine/Cargo.toml -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --manifest-path core-engine/Cargo.toml --all-targets -- -D warnings
 
       - name: Check all targets
         run: cargo check --manifest-path core-engine/Cargo.toml --all-targets

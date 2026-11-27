@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Blue Frog Foundation
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 :root {
   --font-sans: "Segoe UI", -apple-system, BlinkMacSystemFont, "Inter", sans-serif;
   --font-mono: "Cascadia Code", "JetBrains Mono", "Consolas", monospace;
@@ -2594,6 +2610,24 @@ html[data-theme="light"] .ansi-gray { color: #6b7280; }
   color: var(--accent);
 }
 
+.ai-skills-btn {
+  height: 24px;
+  padding: 0 8px;
+  font-size: 11.5px;
+}
+
+.ai-skills-btn.active {
+  background: rgba(139, 92, 246, 0.16);
+  border-color: rgba(139, 92, 246, 0.42);
+  color: #a78bfa;
+}
+
+html[data-theme="light"] .ai-skills-btn.active {
+  background: rgba(124, 58, 237, 0.10);
+  border-color: rgba(124, 58, 237, 0.34);
+  color: #6d28d9;
+}
+
 .ai-header-actions {
   display: flex;
   align-items: center;
@@ -2915,6 +2949,254 @@ html[data-theme="light"] .ansi-gray { color: #6b7280; }
   color: var(--danger);
 }
 
+/* AI Skills Drawer */
+.ai-skills-drawer {
+  display: flex;
+  flex-direction: column;
+  max-height: 62%;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.ai-skills-top {
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.ai-skills-top-btns {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ai-new-skill-btn {
+  flex: 1;
+  min-width: 0;
+}
+
+.ai-harvest-btn {
+  padding: 5px 9px;
+  font-size: 12px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.ai-skills-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px 8px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ai-skills-empty {
+  padding: 14px 10px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  text-align: center;
+  margin: 4px 2px;
+}
+
+.ai-skills-empty p {
+  margin: 0 0 6px;
+}
+
+.ai-first-skill-btn {
+  margin-top: 4px;
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+.ai-skill-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  color: var(--text-secondary);
+}
+
+.ai-skill-row:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.ai-skill-row.is-pinned {
+  background: rgba(139, 92, 246, 0.10);
+}
+
+html[data-theme="light"] .ai-skill-row.is-pinned {
+  background: rgba(124, 58, 237, 0.08);
+}
+
+.ai-skill-row-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.ai-skill-row-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.ai-skill-icon {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  color: #a78bfa;
+}
+
+html[data-theme="light"] .ai-skill-icon {
+  color: #7c3aed;
+}
+
+.ai-skill-slug {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-skill-scope {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-canvas);
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.ai-skill-desc {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-skill-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.ai-skill-form {
+  padding: 10px 12px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ai-skill-form-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ai-skill-form-title {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.ai-skill-slug-preview {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(139, 92, 246, 0.16);
+  border: 1px solid rgba(139, 92, 246, 0.35);
+  color: #c4b5fd;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html[data-theme="light"] .ai-skill-slug-preview {
+  background: rgba(124, 58, 237, 0.10);
+  border-color: rgba(124, 58, 237, 0.30);
+  color: #6d28d9;
+}
+
+.ai-skill-form-row {
+  display: flex;
+  gap: 6px;
+}
+
+.ai-skill-field-grow {
+  flex: 1;
+  min-width: 0;
+}
+
+.ai-skill-field-scope {
+  width: 96px;
+  flex-shrink: 0;
+}
+
+.ai-skill-textarea {
+  width: 100%;
+  min-height: 110px;
+  max-height: 220px;
+  resize: vertical;
+  padding: 6px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.45;
+  outline: none;
+}
+
+.ai-skill-textarea:focus {
+  border-color: var(--accent);
+}
+
+.ai-skill-form-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.ai-skill-form-actions-left,
+.ai-skill-form-actions-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ai-skill-form-actions .primary-btn,
+.ai-skill-form-actions .secondary-btn {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
 .ai-messages {
   flex: 1;
   min-width: 0;
@@ -3052,6 +3334,51 @@ html[data-theme="light"] .ansi-gray { color: #6b7280; }
   text-decoration-color: var(--text-primary);
 }
 
+.ai-inline-skill,
+.ai-inline-skill-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  margin: 0 1px;
+  border-radius: 999px;
+  border: 1px solid rgba(139, 92, 246, 0.38);
+  background: rgba(139, 92, 246, 0.16);
+  color: #c4b5fd;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1.35;
+  vertical-align: baseline;
+  max-width: 100%;
+  user-select: none;
+}
+
+html[data-theme="light"] .ai-inline-skill,
+html[data-theme="light"] .ai-inline-skill-btn {
+  border-color: rgba(124, 58, 237, 0.34);
+  background: rgba(124, 58, 237, 0.10);
+  color: #6d28d9;
+}
+
+.ai-inline-skill-btn {
+  cursor: pointer;
+}
+
+.ai-inline-skill-btn:hover {
+  background: rgba(139, 92, 246, 0.26);
+}
+
+html[data-theme="light"] .ai-inline-skill-btn:hover {
+  background: rgba(124, 58, 237, 0.18);
+}
+
+.ai-inline-skill-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .ai-proposal-card {
   margin: 8px 0;
   padding: 9px 10px;
@@ -3096,7 +3423,49 @@ html[data-theme="light"] .ansi-gray { color: #6b7280; }
 .ai-proposal-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
+}
+
+.ai-skill-proposal-card {
+  border-color: rgba(139, 92, 246, 0.42);
+}
+
+html[data-theme="light"] .ai-skill-proposal-card {
+  border-color: rgba(124, 58, 237, 0.35);
+}
+
+.ai-skill-proposal-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #c4b5fd;
+}
+
+html[data-theme="light"] .ai-skill-proposal-title {
+  color: #6d28d9;
+}
+
+.ai-skill-proposal-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.ai-skill-preview {
+  margin: 0 0 8px;
+  padding: 6px 8px;
+  max-height: 112px;
+  overflow: auto;
+  border-radius: var(--radius-sm);
+  background: var(--bg-code);
+  border: 1px solid var(--border-subtle);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-secondary);
 }
 
 .ai-accept-btn,
@@ -3253,6 +3622,95 @@ html[data-theme="light"] .ansi-gray { color: #6b7280; }
   letter-spacing: 0.5px;
 }
 
+.ai-mention-skill-wrap {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: var(--radius-sm);
+}
+
+.ai-mention-skill-wrap.selected,
+.ai-mention-skill-wrap:hover {
+  background: var(--bg-hover);
+}
+
+.ai-mention-skill-wrap .ai-mention-skill-row {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+}
+
+.ai-mention-skill-wrap .ai-mention-skill-row:hover {
+  background: transparent;
+}
+
+.ai-mention-title-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.ai-mention-pin-btn {
+  width: 24px;
+  height: 24px;
+  margin-right: 4px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.ai-mention-pin-btn:hover {
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+}
+
+.ai-mention-pin-btn.pinned {
+  color: #a78bfa;
+  background: rgba(139, 92, 246, 0.18);
+}
+
+html[data-theme="light"] .ai-mention-pin-btn.pinned {
+  color: #6d28d9;
+  background: rgba(124, 58, 237, 0.12);
+}
+
+.ai-mention-create-row {
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: #c4b5fd;
+  font-size: 12.5px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+
+html[data-theme="light"] .ai-mention-create-row {
+  color: #6d28d9;
+}
+
+.ai-mention-create-row:hover {
+  background: var(--bg-hover);
+}
+
+.ai-mention-footer {
+  padding: 4px 8px 2px;
+  border-top: 1px solid var(--border-subtle);
+  margin-top: 3px;
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+
 .ai-context-chips {
   display: flex;
   flex-wrap: wrap;
@@ -3292,6 +3750,39 @@ html[data-theme="light"] .ansi-gray { color: #6b7280; }
   color: var(--accent);
   font-weight: 600;
   cursor: default;
+}
+
+.ai-chip.ai-skills-trigger.active {
+  background: rgba(139, 92, 246, 0.16);
+  border-color: rgba(139, 92, 246, 0.42);
+  color: #c4b5fd;
+}
+
+html[data-theme="light"] .ai-chip.ai-skills-trigger.active {
+  background: rgba(124, 58, 237, 0.10);
+  border-color: rgba(124, 58, 237, 0.34);
+  color: #6d28d9;
+}
+
+.ai-chip.ai-skill-chip {
+  background: rgba(139, 92, 246, 0.15);
+  border-color: rgba(139, 92, 246, 0.40);
+  color: #ddd6fe;
+  cursor: pointer;
+}
+
+.ai-chip.ai-skill-chip:hover {
+  background: rgba(139, 92, 246, 0.24);
+}
+
+html[data-theme="light"] .ai-chip.ai-skill-chip {
+  background: rgba(124, 58, 237, 0.10);
+  border-color: rgba(124, 58, 237, 0.32);
+  color: #5b21b6;
+}
+
+html[data-theme="light"] .ai-chip.ai-skill-chip:hover {
+  background: rgba(124, 58, 237, 0.18);
 }
 
 .ai-chip-label {
