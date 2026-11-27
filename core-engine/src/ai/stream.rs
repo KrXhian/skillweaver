@@ -1,3 +1,17 @@
+// Copyright 2026 Blue Frog Foundation
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs;
@@ -12,10 +26,14 @@ use tauri::{AppHandle, Emitter};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
+use super::http::{
+    build_curl_config_stdin, curl_binary, extract_http_error_message, status_write_out_arg,
+    HTTP_STATUS_MARKER,
+};
 use super::prefs::{load_ai_prefs, AiPrefs};
+use crate::fs_util::kill_process_tree;
 #[cfg(windows)]
-use super::CREATE_NO_WINDOW;
-use super::{escape_curl_config_value, extract_http_error_message, HTTP_STATUS_MARKER};
+use crate::fs_util::CREATE_NO_WINDOW;
 
 static REQ_TMP_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -53,25 +71,9 @@ impl Drop for AiState {
     fn drop(&mut self) {
         if let Ok(mut guard) = self.active_pid.lock() {
             if let Some(pid) = guard.take() {
-                kill_pid(pid);
+                kill_process_tree(pid);
             }
         }
-    }
-}
-
-fn kill_pid(pid: u32) {
-    #[cfg(windows)]
-    {
-        let _ = Command::new("taskkill")
-            .args(["/F", "/T", "/PID", &pid.to_string()])
-            .creation_flags(CREATE_NO_WINDOW)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .output();
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
     }
 }
 
@@ -390,16 +392,38 @@ impl Drop for PidClearGuard {
     }
 }
 
+struct StreamCompletionGuard {
+    app: AppHandle,
+    request_id: String,
+    finished: bool,
+}
+
+impl Drop for StreamCompletionGuard {
+    fn drop(&mut self) {
+        if !self.finished {
+            let _ = self.app.emit(
+                "ai-stream",
+                AiStreamEvent {
+                    request_id: self.request_id.clone(),
+                    kind: "error".to_string(),
+                    text: "AI stream worker terminated unexpectedly".to_string(),
+                    finish_reason: None,
+                },
+            );
+        }
+    }
+}
+
 /// Starts a background streaming chat request using `curl.exe` with secrets passed via stdin.
 pub fn start_chat_stream(
     app: AppHandle,
     ai_state: &AiState,
-    req: AiChatRequest,
+    req: &AiChatRequest,
 ) -> Result<(), String> {
     cancel_stream(ai_state);
 
     let prefs = load_ai_prefs();
-    let http_req = build_provider_http_request(&prefs, &req)?;
+    let http_req = build_provider_http_request(&prefs, req)?;
     let provider = prefs.provider.clone();
     let request_id = req.request_id.clone();
 
@@ -411,17 +435,12 @@ pub fn start_chat_stream(
     ));
     fs::write(&tmp_path, http_req.body_json.as_bytes())
         .map_err(|e| format!("Failed to stage AI request body: {e}"))?;
+    let tmp_guard = TempFileGuard(tmp_path);
 
-    let mut config_stdin = format!("url = {}\n", escape_curl_config_value(&http_req.url));
-    for (k, v) in &http_req.headers {
-        let header_line = format!("{k}: {v}");
-        config_stdin.push_str(&format!(
-            "header = {}\n",
-            escape_curl_config_value(&header_line)
-        ));
-    }
+    let config_stdin = build_curl_config_stdin(&http_req.url, &http_req.headers);
 
-    let curl_bin = if cfg!(windows) { "curl.exe" } else { "curl" };
+    let curl_bin = curl_binary();
+    let write_out = status_write_out_arg();
     let mut cmd = Command::new(curl_bin);
     cmd.args([
         "-sS",
@@ -434,8 +453,8 @@ pub fn start_chat_stream(
         "-",
         "--data-binary",
     ])
-    .arg(format!("@{}", tmp_path.display()))
-    .args(["-w", &format!("\n{HTTP_STATUS_MARKER}%{{http_code}}\n")])
+    .arg(format!("@{}", tmp_guard.0.display()))
+    .args(["-w", &write_out])
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
@@ -443,36 +462,38 @@ pub fn start_chat_stream(
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
 
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = fs::remove_file(&tmp_path);
-            return Err(format!("Failed to launch {curl_bin}: {e}"));
-        }
-    };
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to launch {curl_bin}: {e}"))?;
 
-    let pid = child.id();
-    if let Ok(mut guard) = ai_state.active_pid.lock() {
-        *guard = Some(pid);
-    }
-    let active_pid_ref = Arc::clone(&ai_state.active_pid);
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("Failed to attach curl stdout".to_string());
+    };
+    let stderr = child.stderr.take();
 
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(config_stdin.as_bytes());
         let _ = stdin.flush();
     }
 
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "Failed to attach curl stdout".to_string())?;
-    let stderr = child.stderr.take();
+    let pid = child.id();
+    if let Ok(mut guard) = ai_state.active_pid.lock() {
+        *guard = Some(pid);
+    }
+    let pid_guard = PidClearGuard {
+        active_pid: Arc::clone(&ai_state.active_pid),
+        pid,
+    };
 
     thread::spawn(move || {
-        let _tmp_guard = TempFileGuard(tmp_path);
-        let _pid_guard = PidClearGuard {
-            active_pid: active_pid_ref,
-            pid,
+        let _tmp_guard = tmp_guard;
+        let _pid_guard = pid_guard;
+        let mut completion_guard = StreamCompletionGuard {
+            app: app.clone(),
+            request_id: request_id.clone(),
+            finished: false,
         };
         let mut reader = BufReader::new(stdout);
         let mut buf = Vec::new();
@@ -539,6 +560,7 @@ pub fn start_chat_stream(
 
         if http_status >= 400 {
             let msg = extract_http_error_message(&raw_non_sse);
+            completion_guard.finished = true;
             let _ = app.emit(
                 "ai-stream",
                 AiStreamEvent {
@@ -557,6 +579,7 @@ pub fn start_chat_stream(
             } else {
                 "AI request cancelled or failed".to_string()
             };
+            completion_guard.finished = true;
             let _ = app.emit(
                 "ai-stream",
                 AiStreamEvent {
@@ -586,6 +609,7 @@ pub fn start_chat_stream(
             }
         }
 
+        completion_guard.finished = true;
         let _ = app.emit(
             "ai-stream",
             AiStreamEvent {
@@ -604,7 +628,7 @@ pub fn start_chat_stream(
 pub fn cancel_stream(ai_state: &AiState) {
     if let Ok(mut guard) = ai_state.active_pid.lock() {
         if let Some(pid) = guard.take() {
-            kill_pid(pid);
+            kill_process_tree(pid);
         }
     }
 }
@@ -812,7 +836,10 @@ mod tests {
             None
         );
         assert_eq!(
-            parse_sse_finish_reason("gemini", r#"{"candidates":[{"finishReason":"MAX_TOKENS"}]}"#),
+            parse_sse_finish_reason(
+                "gemini",
+                r#"{"candidates":[{"finishReason":"MAX_TOKENS"}]}"#
+            ),
             Some("MAX_TOKENS".to_string())
         );
         assert_eq!(

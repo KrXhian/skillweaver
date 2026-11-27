@@ -1,7 +1,22 @@
+// Copyright 2026 Blue Frog Foundation
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -11,9 +26,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
+use super::http::{
+    build_curl_config_stdin, curl_binary, extract_http_error_message, status_write_out_arg,
+    HTTP_STATUS_MARKER,
+};
 #[cfg(windows)]
-use super::CREATE_NO_WINDOW;
-use super::{escape_curl_config_value, extract_http_error_message, HTTP_STATUS_MARKER};
+use crate::fs_util::CREATE_NO_WINDOW;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AiModelInfo {
@@ -33,11 +51,33 @@ pub struct CachedModelList {
 
 pub type ModelsCache = HashMap<String, CachedModelList>;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct AiListModelsRequest {
     pub provider: String,
     pub api_key: String,
     pub base_url: String,
+}
+
+impl fmt::Debug for AiListModelsRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let masked_key = if self.api_key.is_empty() {
+            ""
+        } else {
+            "[REDACTED]"
+        };
+        f.debug_struct("AiListModelsRequest")
+            .field("provider", &self.provider)
+            .field("api_key", &masked_key)
+            .field("base_url", &self.base_url)
+            .finish()
+    }
+}
+
+/// Prepared HTTP request parameters for listing live provider models.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListModelsHttpRequest {
+    pub url: String,
+    pub headers: Vec<(String, String)>,
 }
 
 pub fn models_cache_path() -> Option<PathBuf> {
@@ -78,13 +118,9 @@ pub fn load_models_cache() -> ModelsCache {
 }
 
 pub fn save_models_cache_to(path: &Path, cache: &ModelsCache) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create cache directory {}: {e}", parent.display()))?;
-    }
     let json = serde_json::to_string_pretty(cache)
         .map_err(|e| format!("Failed to serialize models cache: {e}"))?;
-    fs::write(path, json)
+    crate::fs_util::write_atomic(path, json.as_bytes())
         .map_err(|e| format!("Failed to write models cache {}: {e}", path.display()))
 }
 
@@ -98,7 +134,7 @@ fn current_unix_secs() -> u64 {
 /// Builds the provider URL and headers for listing live available models.
 pub fn build_list_models_request(
     req: &AiListModelsRequest,
-) -> Result<(String, Vec<(String, String)>), String> {
+) -> Result<ListModelsHttpRequest, String> {
     let provider = req.provider.trim().to_ascii_lowercase();
     let api_key = req.api_key.trim();
     let base = req.base_url.trim().trim_end_matches('/');
@@ -113,10 +149,10 @@ pub fn build_list_models_request(
             } else {
                 base
             };
-            Ok((
-                format!("{root}/models?pageSize=100"),
-                vec![("x-goog-api-key".to_string(), api_key.to_string())],
-            ))
+            Ok(ListModelsHttpRequest {
+                url: format!("{root}/models?pageSize=100"),
+                headers: vec![("x-goog-api-key".to_string(), api_key.to_string())],
+            })
         }
         "anthropic" => {
             if api_key.is_empty() {
@@ -131,13 +167,13 @@ pub fn build_list_models_request(
             } else {
                 format!("{base}/models")
             };
-            Ok((
+            Ok(ListModelsHttpRequest {
                 url,
-                vec![
+                headers: vec![
                     ("x-api-key".to_string(), api_key.to_string()),
                     ("anthropic-version".to_string(), "2023-06-01".to_string()),
                 ],
-            ))
+            })
         }
         "ollama" => {
             let root = if base.is_empty() {
@@ -149,7 +185,10 @@ pub fn build_list_models_request(
                     .or_else(|| base.strip_suffix("/v1"))
                     .unwrap_or(base)
             };
-            Ok((format!("{root}/api/tags"), Vec::new()))
+            Ok(ListModelsHttpRequest {
+                url: format!("{root}/api/tags"),
+                headers: Vec::new(),
+            })
         }
         "openai" | "openrouter" | "custom" => {
             if provider != "custom" && api_key.is_empty() {
@@ -175,7 +214,7 @@ pub fn build_list_models_request(
             if !api_key.is_empty() {
                 headers.push(("Authorization".to_string(), format!("Bearer {api_key}")));
             }
-            Ok((url, headers))
+            Ok(ListModelsHttpRequest { url, headers })
         }
         other => Err(format!("Unsupported AI provider: {other}")),
     }
@@ -226,8 +265,13 @@ fn is_snapshot_or_preview_id(id: &str) -> bool {
     false
 }
 
+enum VersionChunk {
+    Numeric(u64),
+    Text(String),
+}
+
 fn natural_version_desc(a: &str, b: &str) -> CmpOrdering {
-    fn next_chunk(bytes: &[u8], i: &mut usize) -> (bool, u64, String) {
+    fn next_chunk(bytes: &[u8], i: &mut usize) -> VersionChunk {
         let start = *i;
         let is_num = bytes[*i].is_ascii_digit();
         while *i < bytes.len() && bytes[*i].is_ascii_digit() == is_num {
@@ -235,9 +279,9 @@ fn natural_version_desc(a: &str, b: &str) -> CmpOrdering {
         }
         let slice = std::str::from_utf8(&bytes[start..*i]).unwrap_or("");
         if is_num {
-            (true, slice.parse::<u64>().unwrap_or(0), String::new())
+            VersionChunk::Numeric(slice.parse::<u64>().unwrap_or(0))
         } else {
-            (false, 0, slice.to_ascii_lowercase())
+            VersionChunk::Text(slice.to_ascii_lowercase())
         }
     }
 
@@ -247,11 +291,11 @@ fn natural_version_desc(a: &str, b: &str) -> CmpOrdering {
     while ia < ba.len() && ib < bb.len() {
         let ca = next_chunk(ba, &mut ia);
         let cb = next_chunk(bb, &mut ib);
-        let ord = match (ca.0, cb.0) {
-            (true, true) => cb.1.cmp(&ca.1), // Numeric descending
-            (false, false) => cb.2.cmp(&ca.2),
-            (true, false) => CmpOrdering::Less,
-            (false, true) => CmpOrdering::Greater,
+        let ord = match (ca, cb) {
+            (VersionChunk::Numeric(na), VersionChunk::Numeric(nb)) => nb.cmp(&na),
+            (VersionChunk::Text(ta), VersionChunk::Text(tb)) => tb.cmp(&ta),
+            (VersionChunk::Numeric(_), VersionChunk::Text(_)) => CmpOrdering::Less,
+            (VersionChunk::Text(_), VersionChunk::Numeric(_)) => CmpOrdering::Greater,
         };
         if ord != CmpOrdering::Equal {
             return ord;
@@ -486,7 +530,7 @@ pub fn parse_models_response(provider: &str, body: &str) -> Result<Vec<AiModelIn
                     m.is_snapshot = false;
                 }
             }
-            models.sort_by(|a, b| a.is_snapshot.cmp(&b.is_snapshot));
+            models.sort_by_key(|m| m.is_snapshot);
         }
         "openrouter" => {
             let mut priced: Vec<(f64, AiModelInfo)> = Vec::new();
@@ -617,17 +661,11 @@ pub fn parse_models_response(provider: &str, body: &str) -> Result<Vec<AiModelIn
 
 /// Fetches the live model list from the configured provider and updates `~/.skillweaver/cache/models.json`.
 pub fn list_models(req: &AiListModelsRequest) -> Result<CachedModelList, String> {
-    let (url, headers) = build_list_models_request(req)?;
-    let mut config_stdin = format!("url = {}\n", escape_curl_config_value(&url));
-    for (k, v) in &headers {
-        let header_line = format!("{k}: {v}");
-        config_stdin.push_str(&format!(
-            "header = {}\n",
-            escape_curl_config_value(&header_line)
-        ));
-    }
+    let http_req = build_list_models_request(req)?;
+    let config_stdin = build_curl_config_stdin(&http_req.url, &http_req.headers);
 
-    let curl_bin = if cfg!(windows) { "curl.exe" } else { "curl" };
+    let curl_bin = curl_binary();
+    let write_out = status_write_out_arg();
     let mut cmd = Command::new(curl_bin);
     cmd.args([
         "-sS",
@@ -638,7 +676,7 @@ pub fn list_models(req: &AiListModelsRequest) -> Result<CachedModelList, String>
         "-K",
         "-",
         "-w",
-        &format!("\n{HTTP_STATUS_MARKER}%{{http_code}}\n"),
+        &write_out,
     ])
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
@@ -721,27 +759,28 @@ mod tests {
 
     #[test]
     fn list_models_request_builders_and_parsers_work() {
-        let (gem_url, gem_headers) = build_list_models_request(&AiListModelsRequest {
+        let gem_req = build_list_models_request(&AiListModelsRequest {
             provider: "gemini".into(),
             api_key: "AIzaSecret".into(),
             base_url: "".into(),
         })
         .unwrap();
         assert_eq!(
-            gem_url,
+            gem_req.url,
             "https://generativelanguage.googleapis.com/v1beta/models?pageSize=100"
         );
-        assert!(gem_headers
+        assert!(gem_req
+            .headers
             .iter()
             .any(|(k, v)| k == "x-goog-api-key" && v == "AIzaSecret"));
 
-        let (ollama_url, _) = build_list_models_request(&AiListModelsRequest {
+        let ollama_req = build_list_models_request(&AiListModelsRequest {
             provider: "ollama".into(),
             api_key: "".into(),
             base_url: "http://localhost:11434/v1/chat/completions".into(),
         })
         .unwrap();
-        assert_eq!(ollama_url, "http://localhost:11434/api/tags");
+        assert_eq!(ollama_req.url, "http://localhost:11434/api/tags");
 
         let gem_json = r#"{
             "models": [

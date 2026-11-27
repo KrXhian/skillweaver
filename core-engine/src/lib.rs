@@ -1,5 +1,24 @@
+// Copyright 2026 Blue Frog Foundation
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Core engine library for the Skillweaver desktop application and MCP server.
+
 pub mod ai;
+pub mod base64;
 mod commands;
+pub mod error;
+pub mod fs_util;
 pub mod markdown;
 pub mod mcp;
 pub mod prefs;
@@ -65,6 +84,9 @@ pub fn run() {
             commands::ai_save_chat,
             commands::ai_update_chat_meta,
             commands::ai_delete_chat,
+            commands::ai_list_skills,
+            commands::ai_save_skill,
+            commands::ai_delete_skill,
             commands::search_vault,
             commands::resolve_block_reference,
             commands::get_vault_graph,

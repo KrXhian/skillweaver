@@ -1,3 +1,17 @@
+// Copyright 2026 Blue Frog Foundation
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use crate::vault;
 use notify_debouncer_mini::notify::{RecommendedWatcher, RecursiveMode};
 use notify_debouncer_mini::{new_debouncer, DebounceEventResult, DebouncedEvent, Debouncer};
@@ -26,11 +40,18 @@ pub struct VaultFsChangedEvent {
     pub tree_changed: bool,
 }
 
+/// Categorizes an internal Skillweaver write or deletion for self-write suppression.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelfWriteKind {
+    ContentHash(String),
+    StructuralCreateOrUpdate,
+    Delete,
+}
+
 #[derive(Debug, Clone)]
 struct SuppressedWrite {
     at: Instant,
-    content_hash: Option<String>,
-    is_delete: bool,
+    kind: SelfWriteKind,
 }
 
 #[derive(Default)]
@@ -49,7 +70,9 @@ pub struct VaultWatcherState {
 }
 
 fn norm_lower_key(rel: &str) -> String {
-    rel.replace('\\', "/").trim_matches('/').to_ascii_lowercase()
+    rel.replace('\\', "/")
+        .trim_matches('/')
+        .to_ascii_lowercase()
 }
 
 /// Returns true for paths ignored by the vault watcher (hidden/dot entries, `node_modules`, `target`, `assets`).
@@ -125,22 +148,22 @@ fn is_self_write_suppressed(
         return false;
     };
 
-    if let Some(ref expected_hash) = entry.content_hash {
-        if !is_missing_on_disk && disk_hash == Some(expected_hash.as_str()) {
-            return true;
+    match &entry.kind {
+        SelfWriteKind::ContentHash(expected_hash) => {
+            if !is_missing_on_disk && disk_hash == Some(expected_hash.as_str()) {
+                return true;
+            }
+            // Disk state diverges from what Skillweaver wrote -> external edit happened after our write.
+            suppressed.remove(rel_lower);
+            false
         }
-        // Disk state diverges from what Skillweaver wrote -> external edit happened after our write.
-        suppressed.remove(rel_lower);
-        return false;
-    }
-
-    if entry.at.elapsed() <= SELF_WRITE_STRUCTURAL_WINDOW {
-        if entry.is_delete == is_missing_on_disk || !entry.is_delete {
-            return true;
+        SelfWriteKind::StructuralCreateOrUpdate => {
+            entry.at.elapsed() <= SELF_WRITE_STRUCTURAL_WINDOW
+        }
+        SelfWriteKind::Delete => {
+            entry.at.elapsed() <= SELF_WRITE_STRUCTURAL_WINDOW && is_missing_on_disk
         }
     }
-
-    false
 }
 
 fn read_file_with_retry(path: &Path) -> Option<String> {
@@ -250,7 +273,9 @@ fn process_debounced_events(
                 let disk_hash = read_file_with_retry(&full).map(|c| vault::content_hash(&c));
                 let suppressed_hit = suppressed
                     .lock()
-                    .map(|mut s| is_self_write_suppressed(&mut s, &rel_lower, disk_hash.as_deref(), false))
+                    .map(|mut s| {
+                        is_self_write_suppressed(&mut s, &rel_lower, disk_hash.as_deref(), false)
+                    })
                     .unwrap_or(false);
 
                 let mut known_guard = known_md_files.lock().ok();
@@ -332,7 +357,12 @@ fn process_debounced_events(
                         .map(|mut s| is_self_write_suppressed(&mut s, old_key, None, true))
                         .unwrap_or(false);
                     if !suppressed_hit {
-                        push_dedup_change(&mut changes, &mut index_by_key, old_rel.clone(), "remove");
+                        push_dedup_change(
+                            &mut changes,
+                            &mut index_by_key,
+                            old_rel.clone(),
+                            "remove",
+                        );
                     }
                 }
             }
@@ -343,7 +373,12 @@ fn process_debounced_events(
                         .map(|mut s| is_self_write_suppressed(&mut s, new_key, None, false))
                         .unwrap_or(false);
                     if !suppressed_hit {
-                        push_dedup_change(&mut changes, &mut index_by_key, new_rel.clone(), "create");
+                        push_dedup_change(
+                            &mut changes,
+                            &mut index_by_key,
+                            new_rel.clone(),
+                            "create",
+                        );
                     }
                 }
             }
@@ -367,8 +402,12 @@ fn process_debounced_events(
 impl VaultWatcherState {
     /// Starts (or switches) recursive watching on `root`, emitting `vault:fs-changed` events.
     pub fn watch_folder(&self, app: &AppHandle, root: &Path) -> Result<(), String> {
-        let canon_root = fs::canonicalize(root)
-            .map_err(|e| format!("Failed to canonicalize watched folder {}: {e}", root.display()))?;
+        let canon_root = fs::canonicalize(root).map_err(|e| {
+            format!(
+                "Failed to canonicalize watched folder {}: {e}",
+                root.display()
+            )
+        })?;
 
         let mut guard = self
             .inner
@@ -421,7 +460,7 @@ impl VaultWatcherState {
     }
 
     /// Records an internal Skillweaver write/delete so the watcher suppresses self-triggered events.
-    pub fn record_self_write(&self, rel_path: &str, content_hash: Option<String>, is_delete: bool) {
+    pub fn record_self_write(&self, rel_path: &str, kind: SelfWriteKind) {
         let Ok(guard) = self.inner.lock() else {
             return;
         };
@@ -431,13 +470,13 @@ impl VaultWatcherState {
             return;
         }
 
+        let is_delete = matches!(kind, SelfWriteKind::Delete);
         if let Ok(mut suppressed) = guard.suppressed.lock() {
             suppressed.insert(
                 key.clone(),
                 SuppressedWrite {
                     at: Instant::now(),
-                    content_hash,
-                    is_delete,
+                    kind,
                 },
             );
         }
@@ -519,7 +558,10 @@ mod tests {
         {
             let root = Path::new("/tmp/vault");
             let ev = Path::new("/tmp/vault/notes/spec.md");
-            assert_eq!(to_vault_rel_path(root, ev).as_deref(), Some("notes/spec.md"));
+            assert_eq!(
+                to_vault_rel_path(root, ev).as_deref(),
+                Some("notes/spec.md")
+            );
         }
     }
 
@@ -533,8 +575,7 @@ mod tests {
             "notes/spec.md".to_string(),
             SuppressedWrite {
                 at: Instant::now(),
-                content_hash: Some(my_hash.clone()),
-                is_delete: false,
+                kind: SelfWriteKind::ContentHash(my_hash.clone()),
             },
         );
 

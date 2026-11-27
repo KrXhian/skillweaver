@@ -1,3 +1,17 @@
+// Copyright 2026 Blue Frog Foundation
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -66,9 +80,8 @@ pub fn prefs_path() -> Option<PathBuf> {
 
 /// Loads preferences from a specific path, gracefully handling legacy plain-text or corrupt files.
 pub fn load_prefs_from(path: &Path) -> UiPrefs {
-    let raw = match fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(_) => return UiPrefs::default(),
+    let Ok(raw) = fs::read_to_string(path) else {
+        return UiPrefs::default();
     };
 
     if let Ok(mut prefs) = serde_json::from_str::<UiPrefs>(&raw) {
@@ -115,15 +128,12 @@ pub fn load_prefs() -> UiPrefs {
     }
 }
 
-/// Saves preferences as pretty JSON to the given path, creating parent directories if needed.
+/// Saves preferences as pretty JSON atomically to the given path, creating parent directories if needed.
 pub fn save_prefs_to(path: &Path, prefs: &UiPrefs) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create prefs directory {}: {e}", parent.display()))?;
-    }
     let json = serde_json::to_string_pretty(prefs)
         .map_err(|e| format!("Failed to serialize prefs: {e}"))?;
-    fs::write(path, json).map_err(|e| format!("Failed to write prefs {}: {e}", path.display()))
+    crate::fs_util::write_atomic(path, json.as_bytes())
+        .map_err(|e| format!("Failed to write prefs {}: {e}", path.display()))
 }
 
 /// Saves preferences to the default user prefs path.
@@ -236,11 +246,17 @@ mod tests {
 
         // Missing zoom_percent field in older ui.prefs should default to 100.
         fs::write(&prefs_file, r#"{"theme":"dark"}"#).unwrap();
-        assert_eq!(load_prefs_from(&prefs_file).zoom_percent, ZOOM_DEFAULT_PERCENT);
+        assert_eq!(
+            load_prefs_from(&prefs_file).zoom_percent,
+            ZOOM_DEFAULT_PERCENT
+        );
 
         // Zero resets to 100.
         fs::write(&prefs_file, r#"{"zoom_percent":0}"#).unwrap();
-        assert_eq!(load_prefs_from(&prefs_file).zoom_percent, ZOOM_DEFAULT_PERCENT);
+        assert_eq!(
+            load_prefs_from(&prefs_file).zoom_percent,
+            ZOOM_DEFAULT_PERCENT
+        );
 
         // Low/high out-of-range values clamp to [50, 200].
         fs::write(&prefs_file, r#"{"zoom_percent":25}"#).unwrap();

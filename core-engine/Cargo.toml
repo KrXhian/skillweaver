@@ -2,6 +2,8 @@
 name = "skillweaver"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.88"
+publish = false
 description = "Lightweight local-first block-based Markdown editor and knowledge base"
 authors = ["Blue Frog Foundation"]
 license = "Apache-2.0"
@@ -30,3 +32,13 @@ notify-debouncer-mini = "0.7"
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "warn"
+format_push_string = "warn"

@@ -1,14 +1,31 @@
+// Copyright 2026 Blue Frog Foundation
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 import { displayNameForLink, escapeHtml } from "../inline.js";
 
 export const EDIT_FENCE_REGEX_SOURCE = "```skillweaver-edits[^\\n]*\\r?\\n([\\s\\S]*?)```";
+export const SKILL_FENCE_REGEX_SOURCE = "```skillweaver-skill[^\\n]*\\r?\\n([\\s\\S]*?)```";
 
 export const PAGE_ICON_SVG = `<svg class="ai-page-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 2h5.5L13 5.5V14H4z"/><path d="M9.5 2v3.5H13"/><path d="M6.2 8.2h4.2M6.2 10.7h3.2"/></svg>`;
 
 export const PAGE_LINK_ICON_SVG = `<svg class="ai-link-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 2h5.5L12 5.5V8.5M3 2v11.5h4.2"/><path d="M8.5 2v3.5H12"/><path d="M5 7.5h3.2M5 10h2"/><path d="M9.5 14l4-4M10.5 10h3v3"/></svg>`;
 
-export function extractEditFences(text) {
+export const SKILL_ICON_SVG = `<svg class="ai-skill-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2l1.35 3.65L13 7l-3.65 1.35L8 12l-1.35-3.65L3 7l3.65-1.35z"/><path d="M12.6 10.6l.55 1.45 1.45.55-1.45.55-.55 1.45-.55-1.45-1.45-.55 1.45-.55z"/></svg>`;
+
+function extractFencesWithRegex(text, regexSource) {
   const src = String(text || "");
-  const regex = new RegExp(EDIT_FENCE_REGEX_SOURCE, "g");
+  const regex = new RegExp(regexSource, "g");
   const fences = [];
   let match;
   while ((match = regex.exec(src)) !== null) {
@@ -21,11 +38,22 @@ export function extractEditFences(text) {
   return fences;
 }
 
+export function extractEditFences(text) {
+  return extractFencesWithRegex(text, EDIT_FENCE_REGEX_SOURCE);
+}
+
+export function extractSkillFences(text) {
+  return extractFencesWithRegex(text, SKILL_FENCE_REGEX_SOURCE);
+}
+
 export function stripEditFences(text) {
   return String(text || "")
     .replace(new RegExp(EDIT_FENCE_REGEX_SOURCE, "g"), "")
+    .replace(new RegExp(SKILL_FENCE_REGEX_SOURCE, "g"), "")
     .trim();
 }
+
+export const stripProposalFences = stripEditFences;
 
 export function isTruncatedFinishReason(reason) {
   if (!reason) return false;
@@ -117,6 +145,43 @@ export function parseEditOps(rawJson) {
   return normalized.length ? normalized : null;
 }
 
+export function normalizeSkillSlug(raw) {
+  return String(raw || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64)
+    .replace(/-+$/, "");
+}
+
+export function parseSkillProposal(rawJson) {
+  const parsed = tryParseJsonWithRepair(rawJson);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+
+  const body =
+    typeof parsed.body === "string"
+      ? parsed.body.trim()
+      : typeof parsed.instructions === "string"
+        ? parsed.instructions.trim()
+        : "";
+  const rawSlug = typeof parsed.slug === "string" ? parsed.slug.trim() : "";
+  const rawName = typeof parsed.name === "string" ? parsed.name.trim() : "";
+  if (!body || (!rawSlug && !rawName)) return null;
+
+  const slug = normalizeSkillSlug(rawSlug || rawName);
+  if (!slug) return null;
+
+  const scope = String(parsed.scope || "vault").trim().toLowerCase() === "global" ? "global" : "vault";
+  const description = typeof parsed.description === "string" ? parsed.description.trim() : "";
+  return {
+    slug,
+    name: rawName || slug,
+    description,
+    scope,
+    body,
+  };
+}
+
 export function summarizeBlockPayload(block) {
   if (!block) return "";
   if (block.type === "heading") return `${"#".repeat(block.level || 1)} ${block.content || ""}`;
@@ -141,26 +206,44 @@ export function summarizeBlockPayload(block) {
 
 export function compactAssistantHistoryContent(msg) {
   const text = String(msg?.content || "");
-  const fences = extractEditFences(text);
-  if (!fences.length) return text;
+  const allFences = [
+    ...extractEditFences(text).map((f, idx) => ({ ...f, kind: "edit", idx })),
+    ...extractSkillFences(text).map((f, idx) => ({ ...f, kind: "skill", idx })),
+  ].sort((a, b) => a.start - b.start);
+  if (!allFences.length) return text;
 
   let out = "";
   let lastIdx = 0;
-  fences.forEach((f, idx) => {
+  for (const f of allFences) {
     out += text.slice(lastIdx, f.start);
-    const ops = parseEditOps(f.rawJson);
-    const count = ops ? ops.length : 0;
-    const countLabel = count > 0 ? `${count} page edit${count === 1 ? "" : "s"}` : "page edits";
-    const status = msg?.proposalStates?.[idx] || "pending";
-    const statusLabel =
-      status === "accepted"
-        ? "Accepted by user"
-        : status === "rejected"
-          ? "Rejected by user"
-          : "Pending review";
-    out += `[Proposed ${countLabel} — ${statusLabel}]`;
+    if (f.kind === "edit") {
+      const ops = parseEditOps(f.rawJson);
+      const count = ops ? ops.length : 0;
+      const countLabel = count > 0 ? `${count} page edit${count === 1 ? "" : "s"}` : "page edits";
+      const status = msg?.proposalStates?.[f.idx] || "pending";
+      const statusLabel =
+        status === "accepted"
+          ? "Accepted by user"
+          : status === "rejected"
+            ? "Rejected by user"
+            : "Pending review";
+      out += `[Proposed ${countLabel} — ${statusLabel}]`;
+    } else {
+      const proposal = parseSkillProposal(f.rawJson);
+      const label = proposal ? `@${proposal.slug}` : "skill";
+      const status = msg?.proposalStates?.[`skill-${f.idx}`] || "pending";
+      const statusLabel =
+        status === "accepted"
+          ? "Saved by user"
+          : status === "accepted-pinned"
+            ? "Saved & pinned by user"
+            : status === "rejected"
+              ? "Rejected by user"
+              : "Pending review";
+      out += `[Proposed skill ${label} — ${statusLabel}]`;
+    }
     lastIdx = f.end;
-  });
+  }
   out += text.slice(lastIdx);
   return out.trim();
 }
@@ -171,7 +254,41 @@ function renderInlineLinkButtonHtml(target, label = "") {
   return `<button class="ai-ref-link ai-inline-link-btn" data-target="${escTarget}" type="button" title="${escTarget}">${PAGE_LINK_ICON_SVG}<span class="ai-inline-link-label">${display}</span></button>`;
 }
 
-export function renderUserMessageHtml(text) {
+function renderInlineSkillButtonHtml(slug) {
+  const cleanSlug = String(slug || "").toLowerCase();
+  const escSlug = escapeHtml(cleanSlug);
+  return `<button class="ai-inline-skill-btn" data-skill-slug="${escSlug}" type="button" title="Open skill @${escSlug}">${SKILL_ICON_SVG}<span class="ai-inline-skill-label">@${escapeHtml(slug)}</span></button>`;
+}
+
+function renderPlainUserSegment(seg, knownSkillSlugs) {
+  if (!seg) return "";
+  if (!knownSkillSlugs || knownSkillSlugs.size === 0) {
+    return escapeHtml(seg).replace(/\n/g, "<br>");
+  }
+
+  const skillRegex = /(^|[\s(\[])@([a-zA-Z0-9][a-zA-Z0-9_-]{0,63})(?=$|[\s.,!?;:)\]])/g;
+  let out = "";
+  let lastIdx = 0;
+  let match;
+  while ((match = skillRegex.exec(seg)) !== null) {
+    const lead = match[1] || "";
+    const rawSlug = match[2];
+    const tokenStart = match.index + lead.length;
+    if (knownSkillSlugs.has(rawSlug.toLowerCase())) {
+      if (tokenStart > lastIdx) {
+        out += escapeHtml(seg.slice(lastIdx, tokenStart)).replace(/\n/g, "<br>");
+      }
+      out += renderInlineSkillButtonHtml(rawSlug);
+      lastIdx = skillRegex.lastIndex;
+    }
+  }
+  if (lastIdx < seg.length) {
+    out += escapeHtml(seg.slice(lastIdx)).replace(/\n/g, "<br>");
+  }
+  return out;
+}
+
+export function renderUserMessageHtml(text, knownSkillSlugs = null) {
   const src = String(text || "");
   const regex = /\[\[([^\]|\n]+)(?:\|([^\]\n]+))?\]\]/g;
   let out = "";
@@ -179,19 +296,19 @@ export function renderUserMessageHtml(text) {
   let match;
   while ((match = regex.exec(src)) !== null) {
     if (match.index > lastIdx) {
-      out += escapeHtml(src.slice(lastIdx, match.index)).replace(/\n/g, "<br>");
+      out += renderPlainUserSegment(src.slice(lastIdx, match.index), knownSkillSlugs);
     }
     const target = match[1].trim();
     const label = (match[2] || "").trim();
     if (target) {
       out += renderInlineLinkButtonHtml(target, label);
     } else {
-      out += escapeHtml(match[0]).replace(/\n/g, "<br>");
+      out += renderPlainUserSegment(match[0], knownSkillSlugs);
     }
     lastIdx = regex.lastIndex;
   }
   if (lastIdx < src.length) {
-    out += escapeHtml(src.slice(lastIdx)).replace(/\n/g, "<br>");
+    out += renderPlainUserSegment(src.slice(lastIdx), knownSkillSlugs);
   }
   return out;
 }
@@ -218,79 +335,138 @@ export function renderInlineFormattedText(text) {
   return formatted.replace(/\uE000SWLINK(\d+)\uE001/g, (_, i) => tokens[Number(i)] || "");
 }
 
+function renderEditProposalCard(ops, msg, pIdx, fileBadgeHtml) {
+  const status = msg.proposalStates?.[pIdx] || "pending";
+  const summaryHtml = ops
+    .map((op) => {
+      if (op.op === "replace") {
+        return `<div class="ai-op"><strong>Replace</strong> <code>${escapeHtml(op.block_id || "")}</code>: ${escapeHtml(summarizeBlockPayload(op.block).slice(0, 90))}</div>`;
+      }
+      if (op.op === "insert_after") {
+        const count = op.blocks?.length || 0;
+        return `<div class="ai-op"><strong>Insert ${count} block${count === 1 ? "" : "s"}</strong> after <code>${escapeHtml(op.block_id || "")}</code></div>`;
+      }
+      if (op.op === "append") {
+        const count = op.blocks?.length || 0;
+        return `<div class="ai-op"><strong>Append ${count} block${count === 1 ? "" : "s"}</strong></div>`;
+      }
+      return `<div class="ai-op"><strong>Delete</strong> <code>${escapeHtml(op.block_id || "")}</code></div>`;
+    })
+    .join("");
+
+  let footerHtml = "";
+  if (status === "accepted") {
+    footerHtml = `<span class="ai-proposal-status accepted">Applied (Ctrl+Z to undo)</span>`;
+  } else if (status === "rejected") {
+    footerHtml = `<span class="ai-proposal-status rejected">Dismissed</span>`;
+  } else {
+    footerHtml = `
+        <button class="ai-accept-btn" data-msg="${escapeHtml(msg.id)}" data-prop="${pIdx}" type="button">Accept edits</button>
+        <button class="ai-reject-btn" data-msg="${escapeHtml(msg.id)}" data-prop="${pIdx}" type="button">Reject</button>
+      `;
+  }
+
+  return `
+      <div class="ai-proposal-card">
+        <div class="ai-proposal-title">Proposed Page Edits (${ops.length})${fileBadgeHtml}</div>
+        <div class="ai-proposal-ops">${summaryHtml}</div>
+        <div class="ai-proposal-actions">${footerHtml}</div>
+      </div>
+    `;
+}
+
+function renderSkillProposalCard(proposal, msg, sIdx) {
+  const status = msg.proposalStates?.[`skill-${sIdx}`] || "pending";
+  const scopeLabel = proposal.scope === "global" ? "Global" : "Vault";
+  const previewLines = proposal.body.split("\n").slice(0, 6).join("\n");
+  const clippedPreview =
+    previewLines.length > 260 ? `${previewLines.slice(0, 260).trimEnd()}…` : previewLines;
+
+  let footerHtml = "";
+  if (status === "accepted") {
+    footerHtml = `<span class="ai-proposal-status accepted">Saved to Skill Bank</span>`;
+  } else if (status === "accepted-pinned") {
+    footerHtml = `<span class="ai-proposal-status accepted">Saved &amp; Pinned</span>`;
+  } else if (status === "rejected") {
+    footerHtml = `<span class="ai-proposal-status rejected">Dismissed</span>`;
+  } else {
+    const msgAttr = `data-msg="${escapeHtml(msg.id)}" data-skill-prop="${sIdx}"`;
+    footerHtml = `
+        <button class="ai-accept-btn" data-skill-action="save" ${msgAttr} type="button">Save Skill</button>
+        <button class="ai-mini-btn ai-skill-save-pin-btn" data-skill-action="save-pin" ${msgAttr} type="button">Save &amp; Pin</button>
+        <button class="ai-mini-btn" data-skill-action="edit" ${msgAttr} type="button">Edit</button>
+        <button class="ai-reject-btn" data-skill-action="reject" ${msgAttr} type="button">Reject</button>
+      `;
+  }
+
+  const descHtml = proposal.description
+    ? `<div class="ai-skill-proposal-desc">${escapeHtml(proposal.description)}</div>`
+    : "";
+
+  return `
+      <div class="ai-proposal-card ai-skill-proposal-card">
+        <div class="ai-proposal-title ai-skill-proposal-title">
+          ${SKILL_ICON_SVG}
+          <span>Proposed Skill: @${escapeHtml(proposal.slug)}</span>
+          <span class="ai-skill-scope">${scopeLabel}</span>
+        </div>
+        ${descHtml}
+        <pre class="ai-skill-preview"><code>${escapeHtml(clippedPreview)}</code></pre>
+        <div class="ai-proposal-actions">${footerHtml}</div>
+      </div>
+    `;
+}
+
 export function renderAssistantContentHtml(msg, isStreamingThisMsg = false) {
   const text = msg.content || "";
   const parts = [];
-  const fences = extractEditFences(text);
+  const allFences = [
+    ...extractEditFences(text).map((f, idx) => ({ ...f, kind: "edit", idx })),
+    ...extractSkillFences(text).map((f, idx) => ({ ...f, kind: "skill", idx })),
+  ].sort((a, b) => a.start - b.start);
+
   const fileBadgeHtml = msg.sourceFile
     ? ` <span class="ai-proposal-file" title="Target note">${escapeHtml(msg.sourceFile)}</span>`
     : "";
   let lastIdx = 0;
 
-  fences.forEach((fence, pIdx) => {
+  for (const fence of allFences) {
     if (fence.start > lastIdx) {
       parts.push(`<div class="ai-text">${renderInlineFormattedText(text.slice(lastIdx, fence.start))}</div>`);
     }
 
-    const ops = parseEditOps(fence.rawJson);
-    const status = msg.proposalStates?.[pIdx] || "pending";
-
-    if (ops) {
-      const summaryHtml = ops
-        .map((op) => {
-          if (op.op === "replace") {
-            return `<div class="ai-op"><strong>Replace</strong> <code>${escapeHtml(op.block_id || "")}</code>: ${escapeHtml(summarizeBlockPayload(op.block).slice(0, 90))}</div>`;
-          }
-          if (op.op === "insert_after") {
-            const count = op.blocks?.length || 0;
-            return `<div class="ai-op"><strong>Insert ${count} block${count === 1 ? "" : "s"}</strong> after <code>${escapeHtml(op.block_id || "")}</code></div>`;
-          }
-          if (op.op === "append") {
-            const count = op.blocks?.length || 0;
-            return `<div class="ai-op"><strong>Append ${count} block${count === 1 ? "" : "s"}</strong></div>`;
-          }
-          return `<div class="ai-op"><strong>Delete</strong> <code>${escapeHtml(op.block_id || "")}</code></div>`;
-        })
-        .join("");
-
-      let footerHtml = "";
-      if (status === "accepted") {
-        footerHtml = `<span class="ai-proposal-status accepted">Applied (Ctrl+Z to undo)</span>`;
-      } else if (status === "rejected") {
-        footerHtml = `<span class="ai-proposal-status rejected">Dismissed</span>`;
+    if (fence.kind === "edit") {
+      const ops = parseEditOps(fence.rawJson);
+      if (ops) {
+        parts.push(renderEditProposalCard(ops, msg, fence.idx, fileBadgeHtml));
       } else {
-        footerHtml = `
-            <button class="ai-accept-btn" data-msg="${escapeHtml(msg.id)}" data-prop="${pIdx}" type="button">Accept edits</button>
-            <button class="ai-reject-btn" data-msg="${escapeHtml(msg.id)}" data-prop="${pIdx}" type="button">Reject</button>
-          `;
+        parts.push(`<pre class="ai-code-preview"><code>${escapeHtml(fence.rawJson)}</code></pre>`);
       }
-
-      parts.push(`
-          <div class="ai-proposal-card">
-            <div class="ai-proposal-title">Proposed Page Edits (${ops.length})${fileBadgeHtml}</div>
-            <div class="ai-proposal-ops">${summaryHtml}</div>
-            <div class="ai-proposal-actions">${footerHtml}</div>
-          </div>
-        `);
     } else {
-      parts.push(`<pre class="ai-code-preview"><code>${escapeHtml(fence.rawJson)}</code></pre>`);
+      const proposal = parseSkillProposal(fence.rawJson);
+      if (proposal) {
+        parts.push(renderSkillProposalCard(proposal, msg, fence.idx));
+      } else {
+        parts.push(`<pre class="ai-code-preview"><code>${escapeHtml(fence.rawJson)}</code></pre>`);
+      }
     }
 
     lastIdx = fence.end;
-  });
+  }
 
   if (lastIdx < text.length) {
     const remainder = text.slice(lastIdx);
-    const openFenceIdx = isStreamingThisMsg ? remainder.search(/```skillweaver-edits\b/i) : -1;
-    if (openFenceIdx !== -1) {
-      const before = remainder.slice(0, openFenceIdx);
+    const openMatch = isStreamingThisMsg ? remainder.match(/```skillweaver-(edits|skill)\b/i) : null;
+    if (openMatch) {
+      const before = remainder.slice(0, openMatch.index);
       if (before.trim()) {
         parts.push(`<div class="ai-text">${renderInlineFormattedText(before)}</div>`);
       }
+      const isSkill = openMatch[1].toLowerCase() === "skill";
       parts.push(`
-          <div class="ai-proposal-card ai-proposal-streaming">
-            <div class="ai-proposal-title">Drafting page edits…${fileBadgeHtml}</div>
-            <div class="ai-thinking">Preparing structured block changes…</div>
+          <div class="ai-proposal-card ai-proposal-streaming${isSkill ? " ai-skill-proposal-card" : ""}">
+            <div class="ai-proposal-title">${isSkill ? "Drafting skill…" : `Drafting page edits…${fileBadgeHtml}`}</div>
+            <div class="ai-thinking">${isSkill ? "Preparing reusable SKILL.md instructions…" : "Preparing structured block changes…"}</div>
           </div>
         `);
     } else {
