@@ -1,3 +1,17 @@
+// Copyright 2026 Blue Frog Foundation
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 import { escapeHtml } from "../inline.js";
 import {
   STATIC_SYSTEM_PROMPT,
@@ -7,7 +21,9 @@ import {
 } from "./context.js";
 import {
   extractEditFences,
+  extractSkillFences,
   parseEditOps,
+  parseSkillProposal,
   renderAssistantContentHtml,
   renderUserMessageHtml,
   stripEditFences,
@@ -16,12 +32,14 @@ import {
 import { AiHistoryDrawer, deriveChatTitle } from "./history.js";
 import {
   AiMentionPopover,
+  createAiSkillChipEl,
   handleComposerChipBackspace,
   insertPlainTextIntoComposer,
   normalizeEmptyComposer,
   serializeComposerToPrompt,
 } from "./mentions.js";
 import { AiModelPicker, PROVIDER_PRESETS, canonicalCacheKey } from "./models.js";
+import { AiSkillsDrawer } from "./skills.js";
 import { AiTurnRail } from "./turns.js";
 
 function tauriListen(eventName, handler) {
@@ -31,7 +49,7 @@ function tauriListen(eventName, handler) {
 }
 
 /**
- * Right-side BYOK AI chat drawer with block/selection chips, vault search, and Accept/Reject edits.
+ * Right-side BYOK AI chat drawer with block/selection chips, skills, vault search, and Accept/Reject edits.
  */
 export class AiPanel {
   constructor(
@@ -44,6 +62,8 @@ export class AiPanel {
       newChatBtn,
       historySearchEl,
       historyListEl,
+      skillsBtn,
+      skillsDrawerEl,
       modelBadgeEl,
       modelPopoverEl,
       settingsBtn,
@@ -74,6 +94,9 @@ export class AiPanel {
       onApplyEdits,
       onInsertMarkdown,
       onOpenLink,
+      onOpenRawFile,
+      onVaultChanged,
+      onConfirmDeleteSkill,
       onToast,
       onClearEditorSelection,
       onPromptRenameChat,
@@ -100,6 +123,9 @@ export class AiPanel {
     this.onApplyEdits = onApplyEdits;
     this.onInsertMarkdown = onInsertMarkdown;
     this.onOpenLink = onOpenLink;
+    this.onOpenRawFile = onOpenRawFile;
+    this.onVaultChanged = onVaultChanged;
+    this.onConfirmDeleteSkill = onConfirmDeleteSkill;
     this.onToast = onToast;
     this.onClearEditorSelection = onClearEditorSelection;
 
@@ -116,6 +142,9 @@ export class AiPanel {
     this.searchFolder = true;
     this.pinnedAttachments = []; // { id, kind: "block"|"selection", label, blockId, anchorId, text }
     this.liveSelectedBlocks = [];
+    this.skills = [];
+    this.skillsLoaded = false;
+    this.pinnedSkillIds = [];
     this.messages = []; // { id, role, content, createdAt?, error?, sourceFile?, finishReason?, proposalStates? }
     this.activeChatId = null;
     this.activeChatTitle = "";
@@ -165,6 +194,9 @@ export class AiPanel {
             this.settingsDrawerEl.hidden = true;
             this.settingsBtn?.classList.remove("active");
           }
+          if (this.skillsDrawer.isDrawerOpen()) {
+            this.skillsDrawer.toggle(false);
+          }
           this.modelPicker.close();
           this.turnRail.hidePreview();
         },
@@ -183,6 +215,37 @@ export class AiPanel {
       }
     );
 
+    this.skillsDrawer = new AiSkillsDrawer(
+      { skillsBtn, skillsDrawerEl },
+      {
+        invoke,
+        getCurrentContext,
+        getSkills: () => this.skills,
+        setSkills: (list, opts) => this.setSkills(list, opts),
+        getPinnedSkillIds: () => this.pinnedSkillIds,
+        onTogglePinSkill: (skill, forceState = null) =>
+          this.togglePinSkill(skill, forceState, true),
+        onInsertSkillMention: (skill) => this.insertSkillMentionInComposer(skill),
+        onHarvestChat: () => this.harvestSkillFromChat(),
+        onOpenRawFile,
+        onVaultChanged,
+        onBeforeOpen: () => {
+          if (!this.settingsDrawerEl.hidden) {
+            this.settingsDrawerEl.hidden = true;
+            this.settingsBtn?.classList.remove("active");
+          }
+          if (this.historyDrawer.isDrawerOpen()) {
+            this.historyDrawer.toggle(false);
+          }
+          this.modelPicker.close();
+          this.turnRail.hidePreview();
+        },
+        onOpenStateChange: () => this.renderChips(),
+        onConfirmDelete: onConfirmDeleteSkill,
+        onToast,
+      }
+    );
+
     this.turnRail = new AiTurnRail({ turnRailEl, turnPreviewEl, messagesEl });
 
     this.mentions = new AiMentionPopover({
@@ -190,6 +253,20 @@ export class AiPanel {
       mentionPopoverEl,
       getPages: () => this.getCurrentContext?.().pages || [],
       getCurrentFile: () => this.getCurrentContext?.().currentFile || "",
+      getSkills: () => this.skills,
+      getPinnedSkillIds: () => this.pinnedSkillIds,
+      onPinSkill: (skill) => {
+        const nowPinned = this.togglePinSkill(skill, null, true);
+        this.onToast?.(
+          nowPinned ? `Pinned @${skill.slug} to conversation` : `Unpinned @${skill.slug}`
+        );
+      },
+      onCreateSkill: (query) => {
+        this.skillsDrawer.openCreateForm({
+          slug: query,
+          name: query,
+        });
+      },
     });
 
     settingsBtn.addEventListener("click", () => this.toggleSettings());
@@ -281,6 +358,101 @@ export class AiPanel {
     this.ensurePrefsLoaded();
     this.renderChips();
     this.renderMessages();
+  }
+
+  setSkills(list, opts = {}) {
+    this.skills = Array.isArray(list) ? list : [];
+    this.skillsLoaded = true;
+
+    if (opts?.renamedFrom && opts?.renamedTo) {
+      this.pinnedSkillIds = this.pinnedSkillIds.map((id) =>
+        id === opts.renamedFrom ? opts.renamedTo : id
+      );
+    }
+
+    const validIds = new Set(this.skills.map((s) => s.id));
+    const pruned = [];
+    const seen = new Set();
+    for (const id of this.pinnedSkillIds) {
+      if (validIds.has(id) && !seen.has(id)) {
+        seen.add(id);
+        pruned.push(id);
+      }
+    }
+    this.pinnedSkillIds = pruned;
+
+    this.renderChips();
+    this.skillsDrawer.refresh();
+    if (!this.isStreaming && this.messages.length > 0) {
+      this.renderMessages();
+    }
+  }
+
+  async refreshSkills() {
+    try {
+      const list = await this.invoke("ai_list_skills");
+      if (Array.isArray(list)) {
+        this.setSkills(list);
+      }
+    } catch {
+      // Ignore skill refresh errors when backend is unavailable
+    }
+  }
+
+  togglePinSkill(skillOrId, forceState = null, persistNow = true) {
+    const id = typeof skillOrId === "string" ? skillOrId : skillOrId?.id;
+    if (!id) return false;
+
+    const currentlyPinned = this.pinnedSkillIds.includes(id);
+    const shouldPin = forceState === null ? !currentlyPinned : Boolean(forceState);
+    if (shouldPin && !currentlyPinned) {
+      this.pinnedSkillIds = [...this.pinnedSkillIds, id];
+    } else if (!shouldPin && currentlyPinned) {
+      this.pinnedSkillIds = this.pinnedSkillIds.filter((x) => x !== id);
+    }
+
+    this.renderChips();
+    this.skillsDrawer.refresh();
+    if (persistNow && this.messages.length > 0) {
+      this.persistActiveChat();
+    }
+    return shouldPin;
+  }
+
+  insertSkillMentionInComposer(skill) {
+    if (!skill || !this.inputEl) return;
+    if (this.skillsDrawer.isDrawerOpen()) {
+      this.skillsDrawer.toggle(false);
+    }
+
+    const chip = createAiSkillChipEl(skill.slug, skill.id, skill.description || "");
+    const spaceNode = document.createTextNode(" ");
+    const frag = document.createDocumentFragment();
+    frag.appendChild(chip);
+    frag.appendChild(spaceNode);
+
+    this.inputEl.focus();
+    const sel = window.getSelection();
+    let range = null;
+    if (sel && sel.rangeCount > 0 && this.inputEl.contains(sel.getRangeAt(0).startContainer)) {
+      range = sel.getRangeAt(0);
+      range.deleteContents();
+    } else {
+      range = document.createRange();
+      range.selectNodeContents(this.inputEl);
+      range.collapse(false);
+    }
+
+    range.insertNode(frag);
+    if (sel) {
+      const next = document.createRange();
+      next.setStart(spaceNode, 1);
+      next.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(next);
+    }
+    normalizeEmptyComposer(this.inputEl);
+    this.mentions.close();
   }
 
   isNearBottom(thresholdPx = 48) {
@@ -398,15 +570,20 @@ export class AiPanel {
   async ensurePrefsLoaded() {
     if (this.prefsLoaded) return;
     try {
-      const [loaded, cachedModels, chats] = await Promise.all([
+      const [loaded, cachedModels, chats, skills] = await Promise.all([
         this.invoke("get_ai_prefs"),
         this.invoke("get_cached_models").catch(() => ({})),
         this.invoke("ai_list_chats").catch(() => []),
+        this.invoke("ai_list_skills").catch(() => []),
       ]);
       if (loaded) {
         this.prefs = { ...this.prefs, ...loaded };
       }
       this.modelPicker.setCache(cachedModels);
+      if (Array.isArray(skills)) {
+        this.skills = skills;
+        this.skillsLoaded = true;
+      }
       if (Array.isArray(chats)) {
         this.historyDrawer.setChats(chats);
         if (!this.activeChatId && this.messages.length === 0 && chats.length > 0) {
@@ -422,6 +599,7 @@ export class AiPanel {
       }
       this.prefsLoaded = true;
       this.syncSettingsInputs();
+      this.renderChips();
       const preset = PROVIDER_PRESETS[this.prefs.provider] || PROVIDER_PRESETS.openai;
       if (preset.needsKey && !this.prefs.api_key?.trim()) {
         this.settingsDrawerEl.hidden = false;
@@ -474,6 +652,9 @@ export class AiPanel {
     const nextHidden = forceState === null ? !this.settingsDrawerEl.hidden : !forceState;
     if (!nextHidden && this.historyDrawer.isDrawerOpen()) {
       this.historyDrawer.toggle(false);
+    }
+    if (!nextHidden && this.skillsDrawer.isDrawerOpen()) {
+      this.skillsDrawer.toggle(false);
     }
     this.settingsDrawerEl.hidden = nextHidden;
     this.settingsBtn?.classList.toggle("active", !nextHidden);
@@ -548,9 +729,11 @@ export class AiPanel {
     this.activeChatVaultName = "";
     this.messages = [];
     this.pinnedAttachments = [];
+    this.pinnedSkillIds = [];
     this.turnRail.hidePreview();
     if (this.historyDrawer.isDrawerOpen()) this.historyDrawer.toggle(false);
     this.renderChips();
+    this.skillsDrawer.refresh();
     this.renderMessages();
     if (this.openState) this.inputEl?.focus();
   }
@@ -567,6 +750,13 @@ export class AiPanel {
       this.activeChatCreatedAt = session.created_at || Math.floor(Date.now() / 1000);
       this.activeChatVaultPath = session.vault_path || "";
       this.activeChatVaultName = session.vault_name || "";
+      this.pinnedSkillIds = Array.isArray(session.pinned_skills)
+        ? session.pinned_skills.filter((id) => typeof id === "string" && id.trim())
+        : [];
+      if (this.skillsLoaded) {
+        const validIds = new Set(this.skills.map((s) => s.id));
+        this.pinnedSkillIds = this.pinnedSkillIds.filter((id) => validIds.has(id));
+      }
       this.messages = (session.messages || []).map((m) => {
         const proposalStates = {};
         if (m.proposal_states && typeof m.proposal_states === "object") {
@@ -589,6 +779,7 @@ export class AiPanel {
       this.turnRail.hidePreview();
       if (closeDrawer && this.historyDrawer.isDrawerOpen()) this.historyDrawer.toggle(false);
       this.renderChips();
+      this.skillsDrawer.refresh();
       this.renderMessages(true);
       this.historyDrawer.refresh();
     } catch (err) {
@@ -618,6 +809,7 @@ export class AiPanel {
       pinned: Boolean(this.activeChatPinned),
       created_at: this.activeChatCreatedAt || nowSec,
       updated_at: nowSec,
+      pinned_skills: this.pinnedSkillIds.slice(),
       messages: this.messages.map((m) => {
         const proposal_states = {};
         for (const [k, v] of Object.entries(m.proposalStates || {})) {
@@ -678,7 +870,7 @@ export class AiPanel {
       this.inputEl.dataset.placeholder =
         count > 0
           ? `Ask about these ${count} highlighted block${count === 1 ? "" : "s"}...`
-          : "Ask about this note, highlights, or folder...";
+          : "Ask AI, @skill, or @@page...";
     }
     this.renderChips();
   }
@@ -719,6 +911,31 @@ export class AiPanel {
       `<button class="ai-chip${this.searchFolder ? " active" : ""}" data-chip="vault" type="button" title="Toggle searching across all .md files in folder">Search Folder</button>`
     );
 
+    const skillById = new Map(this.skills.map((s) => [s.id, s]));
+    const activePinnedSkills = this.pinnedSkillIds
+      .map((id) => skillById.get(id))
+      .filter(Boolean);
+    const skillsTriggerActive = this.skillsDrawer.isDrawerOpen() || activePinnedSkills.length > 0;
+    const skillsBadgeLabel = activePinnedSkills.length > 0
+      ? `✦ Skills (${activePinnedSkills.length})`
+      : "✦ Skills";
+
+    parts.push(
+      `<button class="ai-chip ai-skills-trigger${skillsTriggerActive ? " active" : ""}" data-chip="skills" type="button" title="Manage, create, or pin AI skills (@skill)">${skillsBadgeLabel}</button>`
+    );
+
+    for (const skill of activePinnedSkills) {
+      const tip = skill.description
+        ? `@${skill.slug} (${skill.scope}) — ${skill.description}`
+        : `@${skill.slug} (${skill.scope})`;
+      parts.push(`
+        <span class="ai-chip ai-skill-chip" data-open-skill="${escapeHtml(skill.id)}" title="${escapeHtml(tip)}">
+          <span class="ai-chip-label">✦ @${escapeHtml(skill.slug)}</span>
+          <button class="ai-chip-remove" data-unpin-skill="${escapeHtml(skill.id)}" type="button" title="Unpin skill">×</button>
+        </span>
+      `);
+    }
+
     if (this.liveSelectedBlocks.length > 0) {
       const count = this.liveSelectedBlocks.length;
       parts.push(`
@@ -748,6 +965,24 @@ export class AiPanel {
       this.searchFolder = !this.searchFolder;
       this.renderChips();
     });
+    this.chipsEl.querySelector('[data-chip="skills"]')?.addEventListener("click", () => {
+      this.skillsDrawer.toggle();
+    });
+    this.chipsEl.querySelectorAll("[data-open-skill]").forEach((chip) => {
+      chip.addEventListener("click", (e) => {
+        if (e.target.closest("[data-unpin-skill]")) return;
+        const skill = this.skills.find((s) => s.id === chip.dataset.openSkill);
+        if (skill) {
+          this.skillsDrawer.openEditForm(skill);
+        }
+      });
+    });
+    this.chipsEl.querySelectorAll("[data-unpin-skill]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this.togglePinSkill(btn.dataset.unpinSkill, false, true);
+      });
+    });
     this.chipsEl.querySelector('[data-clear-focus="1"]')?.addEventListener("click", () => {
       this.onClearEditorSelection?.();
     });
@@ -770,9 +1005,12 @@ export class AiPanel {
     this.finishStreaming();
   }
 
-  async send() {
+  async send(overridePrompt = null) {
     this.mentions.close();
-    const prompt = serializeComposerToPrompt(this.inputEl).trim();
+    const isManualSend = overridePrompt === null;
+    const prompt = isManualSend
+      ? serializeComposerToPrompt(this.inputEl).trim()
+      : String(overridePrompt).trim();
     if (!prompt || this.isStreaming) return;
 
     await this.ensurePrefsLoaded();
@@ -789,7 +1027,9 @@ export class AiPanel {
       return;
     }
 
-    this.inputEl.innerHTML = "";
+    if (isManualSend) {
+      this.inputEl.innerHTML = "";
+    }
 
     const currentCtx = this.getCurrentContext?.() || {};
     const sourceFile = currentCtx.currentFile || null;
@@ -823,6 +1063,8 @@ export class AiPanel {
         searchFolder: this.searchFolder,
         liveSelectedBlocks: this.liveSelectedBlocks,
         pinnedAttachments: this.pinnedAttachments,
+        skills: this.skills,
+        pinnedSkillIds: this.pinnedSkillIds,
         invoke: this.invoke,
       });
     } catch (err) {
@@ -857,6 +1099,24 @@ export class AiPanel {
     }
   }
 
+  harvestSkillFromChat() {
+    if (this.isStreaming) {
+      this.onToast?.("Wait for the current response to finish", true);
+      return;
+    }
+    if (!this.messages.length) {
+      this.skillsDrawer.openCreateForm({});
+      this.onToast?.("Start a conversation to harvest from, or create a skill manually here");
+      return;
+    }
+    if (this.skillsDrawer.isDrawerOpen()) {
+      this.skillsDrawer.toggle(false);
+    }
+    this.send(
+      "Harvest the reusable workflow, rules, and patterns from our conversation above into a clean Skillweaver skill proposal using ```skillweaver-skill."
+    );
+  }
+
   async handleMessagesClick(e) {
     const refBtn = e.target.closest(".ai-ref-link");
     if (refBtn) {
@@ -865,13 +1125,35 @@ export class AiPanel {
       return;
     }
 
-    const acceptBtn = e.target.closest(".ai-accept-btn");
+    const skillLinkBtn = e.target.closest(".ai-inline-skill-btn");
+    if (skillLinkBtn) {
+      const slug = String(skillLinkBtn.dataset.skillSlug || "").toLowerCase();
+      const matched = this.skills.find((s) => (s.slug || "").toLowerCase() === slug);
+      if (matched) {
+        this.skillsDrawer.openEditForm(matched);
+      } else {
+        this.onToast?.(`Skill @${slug} was not found`, true);
+      }
+      return;
+    }
+
+    const skillActBtn = e.target.closest("[data-skill-action]");
+    if (skillActBtn) {
+      await this.handleSkillProposalAction(
+        skillActBtn.dataset.msg,
+        Number(skillActBtn.dataset.skillProp),
+        skillActBtn.dataset.skillAction
+      );
+      return;
+    }
+
+    const acceptBtn = e.target.closest(".ai-accept-btn[data-prop]");
     if (acceptBtn) {
       await this.handleProposalAction(acceptBtn.dataset.msg, Number(acceptBtn.dataset.prop), true);
       return;
     }
 
-    const rejectBtn = e.target.closest(".ai-reject-btn");
+    const rejectBtn = e.target.closest(".ai-reject-btn[data-prop]");
     if (rejectBtn) {
       await this.handleProposalAction(rejectBtn.dataset.msg, Number(rejectBtn.dataset.prop), false);
       return;
@@ -900,6 +1182,21 @@ export class AiPanel {
       if (!msg) return;
       const clean = stripEditFences(msg.content);
       if (clean) this.onInsertMarkdown?.(clean);
+      return;
+    }
+
+    const saveSkillBtn = e.target.closest("[data-save-skill]");
+    if (saveSkillBtn) {
+      const msg = this.messages.find((m) => m.id === saveSkillBtn.dataset.saveSkill);
+      if (!msg) return;
+      const clean = stripEditFences(msg.content);
+      if (!clean) return;
+      const headingMatch = clean.match(/^#{1,3}\s+(.+)$/m);
+      const suggestedName = headingMatch ? headingMatch[1].trim().slice(0, 60) : "";
+      this.skillsDrawer.openCreateForm({
+        name: suggestedName,
+        body: clean,
+      });
       return;
     }
 
@@ -932,12 +1229,13 @@ export class AiPanel {
       this.messagesEl.innerHTML = `
         <div class="ai-empty">
           <p><strong>Ask anything</strong> about this page or your whole markdown folder.</p>
-          <p class="ai-empty-hint">Click <code>⋮⋮</code> on any block → <strong>Ask AI</strong>, highlight text, or type <code>@@page</code>.</p>
+          <p class="ai-empty-hint">Click <code>⋮⋮</code> on any block → <strong>Ask AI</strong>, type <code>@skill</code>, <code>@@page</code>, or pin skills below.</p>
         </div>
       `;
       return;
     }
 
+    const knownSkillSlugs = new Set(this.skills.map((s) => String(s.slug || "").toLowerCase()));
     const turns = [];
     const msgToTurn = new Map();
     for (let i = 0; i < this.messages.length; i++) {
@@ -965,7 +1263,7 @@ export class AiPanel {
         const turnAttr = tIdx !== undefined ? ` data-turn-idx="${tIdx}"` : "";
         const msgAttr = ` data-msg-id="${escapeHtml(msg.id)}"`;
         if (msg.role === "user") {
-          return `<div class="ai-msg ai-msg-user"${msgAttr}${turnAttr}><div class="ai-bubble">${renderUserMessageHtml(msg.content)}</div></div>`;
+          return `<div class="ai-msg ai-msg-user"${msgAttr}${turnAttr}><div class="ai-bubble">${renderUserMessageHtml(msg.content, knownSkillSlugs)}</div></div>`;
         }
         const isStreamingThis = this.isStreaming && msg.id === this.activeRequestId;
         let bodyHtml;
@@ -992,6 +1290,7 @@ export class AiPanel {
             ? `<div class="ai-msg-actions">
                <button class="ai-mini-btn" data-copy="${escapeHtml(msg.id)}" type="button">Copy</button>
                <button class="ai-mini-btn" data-insert="${escapeHtml(msg.id)}" type="button">Insert into note</button>
+               <button class="ai-mini-btn" data-save-skill="${escapeHtml(msg.id)}" type="button" title="Save this response as a reusable Skill">Save as Skill</button>
              </div>`
             : "";
 
@@ -1009,6 +1308,78 @@ export class AiPanel {
       this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
     }
     this.turnRail.updateActiveDot();
+  }
+
+  async handleSkillProposalAction(msgId, propIdx, action) {
+    if (this._applyingProposal) return;
+    const msg = this.messages.find((m) => m.id === msgId);
+    if (!msg) return;
+
+    const stateKey = `skill-${propIdx}`;
+    if (action === "reject") {
+      msg.proposalStates[stateKey] = "rejected";
+      this.renderMessages();
+      this.persistActiveChat();
+      return;
+    }
+
+    const fences = extractSkillFences(msg.content);
+    const targetFence = fences[propIdx];
+    if (!targetFence) return;
+
+    const proposal = parseSkillProposal(targetFence.rawJson);
+    if (!proposal) return;
+
+    if (action === "edit") {
+      this.skillsDrawer.openCreateForm(proposal);
+      return;
+    }
+
+    const ctx = this.getCurrentContext?.() || {};
+    const effectiveScope =
+      proposal.scope === "vault" && !ctx.vaultPath ? "global" : proposal.scope;
+
+    this._applyingProposal = true;
+    try {
+      const saved = await this.invoke("ai_save_skill", {
+        request: {
+          slug: proposal.slug,
+          name: proposal.name,
+          description: proposal.description,
+          scope: effectiveScope,
+          body: proposal.body,
+          original_id: null,
+        },
+      });
+      const list = await this.invoke("ai_list_skills").catch(() => null);
+      if (Array.isArray(list)) {
+        this.skills = list;
+        this.skillsLoaded = true;
+      }
+
+      const pinAfter = action === "save-pin";
+      if (pinAfter) {
+        this.togglePinSkill(saved.id, true, false);
+      }
+
+      msg.proposalStates[stateKey] = pinAfter ? "accepted-pinned" : "accepted";
+      if (saved.scope === "vault") {
+        this.onVaultChanged?.();
+      }
+      this.renderChips();
+      this.skillsDrawer.refresh();
+      this.renderMessages();
+      this.persistActiveChat();
+      this.onToast?.(
+        pinAfter
+          ? `Saved & pinned @${saved.slug}`
+          : `Saved skill @${saved.slug} (${saved.scope})`
+      );
+    } catch (err) {
+      this.onToast?.(`Failed to save skill: ${err}`, true);
+    } finally {
+      this._applyingProposal = false;
+    }
   }
 
   async handleProposalAction(msgId, propIdx, accepted) {

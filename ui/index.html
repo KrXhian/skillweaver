@@ -1,4 +1,19 @@
 <!DOCTYPE html>
+<!--
+  Copyright 2026 Blue Frog Foundation
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+      https://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+-->
 <html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
@@ -249,6 +264,9 @@
           <button id="ai-model-badge" class="ai-model-badge" type="button" title="Switch AI model"></button>
         </div>
         <div class="ai-header-actions">
+          <button id="ai-btn-skills" class="top-text-btn ai-skills-btn" title="Manage AI Skills (@skill)" aria-label="AI Skills">
+            Skills
+          </button>
           <button id="ai-btn-settings" class="top-text-btn ai-settings-btn" title="API Key, Provider &amp; Model Settings" aria-label="AI Settings">
             Settings
           </button>
@@ -275,6 +293,8 @@
         <div id="ai-history-list" class="ai-history-list"></div>
       </div>
 
+      <div id="ai-skills-drawer" class="ai-skills-drawer" hidden aria-label="AI Skills"></div>
+
       <div id="ai-settings-drawer" class="ai-settings-drawer" hidden>
         <label class="ai-field">
           <span>Provider</span>
@@ -288,7 +308,7 @@
           </select>
         </label>
         <label class="ai-field">
-          <span>API Key <small>(stored in ~/.skillweaver/ai.prefs)</small></span>
+          <span>API Key <small>(encrypted in ~/.skillweaver/ai.prefs)</small></span>
           <div class="ai-key-row">
             <input id="ai-api-key" type="password" placeholder="Paste your API key..." autocomplete="off" />
             <button id="ai-toggle-key" class="top-text-btn" type="button" title="Show/Hide Key">Eye</button>
@@ -320,7 +340,7 @@
         <div id="ai-mention-popover" class="popover ai-mention-popover" hidden role="listbox" aria-label="Mention page"></div>
         <div id="ai-context-chips" class="ai-context-chips"></div>
         <div class="ai-input-box">
-          <div id="ai-input" class="ai-input" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Ask AI" spellcheck="true" data-placeholder="Ask about this note, highlights, or folder..."></div>
+          <div id="ai-input" class="ai-input" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Ask AI" spellcheck="true" data-placeholder="Ask AI, @skill, or @@page..."></div>
           <div class="ai-send-row">
             <span class="ai-send-hint">Enter to send · Shift+Enter newline</span>
             <button id="ai-send-btn" class="primary-btn ai-send-btn" type="button">Send</button>

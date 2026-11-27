@@ -1,3 +1,20 @@
+// Copyright 2026 Blue Frog Foundation
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use crate::fs_util::kill_process_tree;
+#[cfg(windows)]
+use crate::fs_util::CREATE_NO_WINDOW;
 use crate::prefs;
 use serde::Serialize;
 use std::fs;
@@ -11,9 +28,6 @@ use tauri::{AppHandle, Emitter};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
-
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 const PROMPT_MARKER: &str = "__SW_PROMPT__";
 
@@ -90,29 +104,19 @@ pub struct TerminalState {
     inner: Mutex<Option<TerminalSession>>,
 }
 
-fn kill_process_tree(pid: u32) {
-    #[cfg(windows)]
-    {
-        let _ = Command::new("taskkill")
-            .args(["/F", "/T", "/PID", &pid.to_string()])
-            .creation_flags(CREATE_NO_WINDOW)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .output();
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = pid;
-    }
-}
-
 fn parse_prompt_marker(line: &str) -> Option<String> {
     line.strip_prefix(PROMPT_MARKER)
         .map(|rest| prefs::clean_folder_path(rest.trim()))
 }
 
+#[cfg(any(windows, test))]
 fn escape_ps_single_quoted(value: &str) -> String {
     value.replace('\'', "''")
+}
+
+#[cfg(any(not(windows), test))]
+fn escape_sh_single_quoted(value: &str) -> String {
+    value.replace('\'', "'\"'\"'")
 }
 
 fn resolve_start_dir(fallback_dir: Option<&Path>) -> PathBuf {
@@ -202,7 +206,8 @@ fn spawn_session(app: &AppHandle, start_dir: &Path) -> Result<TerminalSession, S
                             *guard = next_cwd.clone();
                         }
                         running_out.store(false, Ordering::SeqCst);
-                        let _ = app_out.emit("terminal-prompt", TerminalPromptEvent { cwd: next_cwd });
+                        let _ =
+                            app_out.emit("terminal-prompt", TerminalPromptEvent { cwd: next_cwd });
                     } else {
                         let _ = app_out.emit(
                             "terminal-output",
@@ -420,9 +425,12 @@ impl TerminalState {
 
         let clean = prefs::clean_folder_path(&folder.to_string_lossy());
         #[cfg(windows)]
-        let cd_cmd = format!("Set-Location -LiteralPath '{}'", escape_ps_single_quoted(&clean));
+        let cd_cmd = format!(
+            "Set-Location -LiteralPath '{}'",
+            escape_ps_single_quoted(&clean)
+        );
         #[cfg(not(windows))]
-        let cd_cmd = format!("cd '{}'", escape_ps_single_quoted(&clean));
+        let cd_cmd = format!("cd '{}'", escape_sh_single_quoted(&clean));
 
         write_command_with_prompt(session, &cd_cmd)?;
         Ok(Some(clean))
@@ -527,6 +535,14 @@ mod tests {
         assert_eq!(
             escape_ps_single_quoted(r"C:\Alice's Notes\md"),
             r"C:\Alice''s Notes\md"
+        );
+    }
+
+    #[test]
+    fn escape_sh_single_quoted_wraps_apostrophes() {
+        assert_eq!(
+            escape_sh_single_quoted("/tmp/Alice's Notes/md"),
+            r#"/tmp/Alice'"'"'s Notes/md"#
         );
     }
 
@@ -682,7 +698,10 @@ mod tests {
             stdout.contains("\u{2514}\u{2500}\u{2500}\u{2500}02 - Data"),
             "Expected Unicode corner branch, got:\n{stdout}"
         );
-        assert!(!stdout.contains('\u{FFFD}'), "Unexpected U+FFFD in:\n{stdout}");
+        assert!(
+            !stdout.contains('\u{FFFD}'),
+            "Unexpected U+FFFD in:\n{stdout}"
+        );
 
         let _ = fs::remove_dir_all(&root);
     }

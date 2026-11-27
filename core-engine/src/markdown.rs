@@ -1,4 +1,19 @@
+// Copyright 2026 Blue Frog Foundation
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use serde::{Deserialize, Serialize};
+use std::fmt::Write as _;
 
 /// A single editable block inside a Skillweaver markdown document.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -200,9 +215,7 @@ fn parse_atx_heading(line: &str) -> Option<(u8, String)> {
         return None;
     }
     let after_hashes = &rest[level..];
-    if !after_hashes.is_empty()
-        && !after_hashes.starts_with(' ')
-        && !after_hashes.starts_with('\t')
+    if !after_hashes.is_empty() && !after_hashes.starts_with(' ') && !after_hashes.starts_with('\t')
     {
         return None;
     }
@@ -232,7 +245,14 @@ fn parse_legacy_summary(trimmed: &str) -> Option<String> {
 }
 
 fn has_image_extension(path: &str) -> bool {
-    let clean = path.split('#').next().unwrap_or(path).split('?').next().unwrap_or(path).trim();
+    let clean = path
+        .split('#')
+        .next()
+        .unwrap_or(path)
+        .split('?')
+        .next()
+        .unwrap_or(path)
+        .trim();
     let lower = clean.to_ascii_lowercase();
     [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"]
         .iter()
@@ -240,7 +260,10 @@ fn has_image_extension(path: &str) -> bool {
 }
 
 fn parse_image_line(trimmed: &str) -> Option<(String, String)> {
-    if trimmed.starts_with("![[") && trimmed.ends_with("]]") && !trimmed[3..trimmed.len() - 2].contains("]]") {
+    if trimmed.starts_with("![[")
+        && trimmed.ends_with("]]")
+        && !trimmed[3..trimmed.len() - 2].contains("]]")
+    {
         let inner = trimmed[3..trimmed.len() - 2].trim();
         let (target, alt) = match inner.split_once('|') {
             Some((t, a)) => (t.trim(), a.trim().to_string()),
@@ -323,7 +346,10 @@ fn parse_standalone_block_id_line(trimmed: &str) -> Option<String> {
 }
 
 fn parse_divider_line(trimmed: &str) -> bool {
-    let chars: Vec<char> = trimmed.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+    let chars: Vec<char> = trimmed
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace())
+        .collect();
     if chars.len() < 3 {
         return false;
     }
@@ -452,7 +478,13 @@ fn is_valid_color_name(s: &str) -> bool {
     )
 }
 
-fn parse_style_comment(trimmed: &str) -> Option<(Option<String>, Option<String>)> {
+#[derive(Default)]
+struct BlockStyle {
+    color: Option<String>,
+    bg: Option<String>,
+}
+
+fn parse_style_comment(trimmed: &str) -> Option<BlockStyle> {
     let inner = trimmed.strip_prefix("<!--")?.strip_suffix("-->")?.trim();
     let val = inner.strip_prefix("style:")?.trim();
     if val.is_empty() {
@@ -480,7 +512,7 @@ fn parse_style_comment(trimmed: &str) -> Option<(Option<String>, Option<String>)
     if color.is_none() && bg.is_none() {
         None
     } else {
-        Some((color, bg))
+        Some(BlockStyle { color, bg })
     }
 }
 
@@ -755,475 +787,379 @@ fn escape_table_cell(cell: &str) -> String {
     out
 }
 
-/// Parses a Markdown string into Skillweaver editor blocks.
-pub fn parse_markdown(input: &str) -> Vec<Block> {
-    let normalized = input.replace("\r\n", "\n").replace('\r', "\n");
-    let mut blocks = Vec::new();
-    let mut counter = 0usize;
-    let mut para_lines: Vec<&str> = Vec::new();
-    let mut pending_outdent: Option<u8> = None;
-    let mut pending_col_widths: Vec<u16> = Vec::new();
-    let mut pending_color: Option<String> = None;
-    let mut pending_bg: Option<String> = None;
+#[derive(Default)]
+struct MarkdownParser<'a> {
+    blocks: Vec<Block>,
+    counter: usize,
+    para_lines: Vec<&'a str>,
+    pending_outdent: Option<u8>,
+    pending_col_widths: Vec<u16>,
+    pending_color: Option<String>,
+    pending_bg: Option<String>,
+}
 
-    let flush_para = |para_lines: &mut Vec<&str>,
-                      blocks: &mut Vec<Block>,
-                      counter: &mut usize,
-                      pending_outdent: &mut Option<u8>,
-                      pending_col_widths: &mut Vec<u16>,
-                      pending_color: &mut Option<String>,
-                      pending_bg: &mut Option<String>| {
-        if !para_lines.is_empty() {
-            let joined = para_lines.join("\n");
-            para_lines.clear();
-            pending_col_widths.clear();
-            let (clean, block_id) = strip_trailing_block_id(&joined);
-            blocks.push(Block::Paragraph {
-                id: next_id(counter),
-                block_id,
-                outdent: pending_outdent.take(),
-                color: pending_color.take(),
-                bg: pending_bg.take(),
-                content: clean.to_string(),
-            });
-        }
-    };
-
-    let lines: Vec<&str> = normalized.split('\n').collect();
-    let mut i = 0usize;
-    while i < lines.len() {
-        let line = lines[i];
-
-        if let Some(fence) = parse_fence_open(line) {
-            flush_para(
-                &mut para_lines,
-                &mut blocks,
-                &mut counter,
-                &mut pending_outdent,
-                &mut pending_col_widths,
-                &mut pending_color,
-                &mut pending_bg,
-            );
-            pending_col_widths.clear();
-            let mut code_lines = Vec::new();
-            i += 1;
-            while i < lines.len() {
-                if is_fence_close(lines[i], fence.ch, fence.len) {
-                    i += 1;
-                    break;
-                }
-                code_lines.push(lines[i]);
-                i += 1;
-            }
-            blocks.push(Block::Code {
-                id: next_id(&mut counter),
-                block_id: None,
-                outdent: pending_outdent.take(),
-                color: pending_color.take(),
-                bg: pending_bg.take(),
-                language: fence.language,
-                content: code_lines.join("\n"),
-            });
-            continue;
-        }
-
-        let trimmed = line.trim();
-        let lower_trimmed = trimmed.to_ascii_lowercase();
-
-        if lower_trimmed.starts_with("<details") || lower_trimmed == "</details>" {
-            flush_para(
-                &mut para_lines,
-                &mut blocks,
-                &mut counter,
-                &mut pending_outdent,
-                &mut pending_col_widths,
-                &mut pending_color,
-                &mut pending_bg,
-            );
-            i += 1;
-            continue;
-        }
-
-        if let Some(outdent_val) = parse_outdent_comment(trimmed) {
-            flush_para(
-                &mut para_lines,
-                &mut blocks,
-                &mut counter,
-                &mut pending_outdent,
-                &mut pending_col_widths,
-                &mut pending_color,
-                &mut pending_bg,
-            );
-            pending_outdent = Some(outdent_val);
-            i += 1;
-            continue;
-        }
-
-        if let Some((c, b)) = parse_style_comment(trimmed) {
-            flush_para(
-                &mut para_lines,
-                &mut blocks,
-                &mut counter,
-                &mut pending_outdent,
-                &mut pending_col_widths,
-                &mut pending_color,
-                &mut pending_bg,
-            );
-            pending_color = c;
-            pending_bg = b;
-            i += 1;
-            continue;
-        }
-
-        if let Some(widths) = parse_col_widths_comment(trimmed) {
-            flush_para(
-                &mut para_lines,
-                &mut blocks,
-                &mut counter,
-                &mut pending_outdent,
-                &mut pending_col_widths,
-                &mut pending_color,
-                &mut pending_bg,
-            );
-            pending_col_widths = widths;
-            i += 1;
-            continue;
-        }
-
-        if let Some(summary) = parse_legacy_summary(trimmed) {
-            flush_para(
-                &mut para_lines,
-                &mut blocks,
-                &mut counter,
-                &mut pending_outdent,
-                &mut pending_col_widths,
-                &mut pending_color,
-                &mut pending_bg,
-            );
-            pending_outdent = None;
-            pending_col_widths.clear();
-            let (clean, block_id) = strip_trailing_block_id(&summary);
-            blocks.push(Block::Heading {
-                id: next_id(&mut counter),
-                block_id,
-                color: pending_color.take(),
-                bg: pending_bg.take(),
-                level: 2,
-                content: clean.to_string(),
-            });
-            i += 1;
-            continue;
-        }
-
-        if let Some((level, content)) = parse_atx_heading(line) {
-            flush_para(
-                &mut para_lines,
-                &mut blocks,
-                &mut counter,
-                &mut pending_outdent,
-                &mut pending_col_widths,
-                &mut pending_color,
-                &mut pending_bg,
-            );
-            pending_outdent = None;
-            pending_col_widths.clear();
-            let (clean, block_id) = strip_trailing_block_id(&content);
-            blocks.push(Block::Heading {
-                id: next_id(&mut counter),
-                block_id,
-                color: pending_color.take(),
-                bg: pending_bg.take(),
-                level,
-                content: clean.to_string(),
-            });
-            i += 1;
-            continue;
-        }
-
-        if let Some((src, alt)) = parse_image_line(trimmed) {
-            flush_para(
-                &mut para_lines,
-                &mut blocks,
-                &mut counter,
-                &mut pending_outdent,
-                &mut pending_col_widths,
-                &mut pending_color,
-                &mut pending_bg,
-            );
-            pending_col_widths.clear();
-            blocks.push(Block::Image {
-                id: next_id(&mut counter),
-                block_id: None,
-                outdent: pending_outdent.take(),
-                color: pending_color.take(),
-                bg: pending_bg.take(),
-                src,
-                alt,
-            });
-            i += 1;
-            continue;
-        }
-
-        if para_lines.is_empty() {
-            if let Some(bid) = parse_standalone_block_id_line(trimmed) {
-                let attached = match blocks.last_mut() {
-                    Some(Block::Code { block_id, .. }) if block_id.is_none() => {
-                        *block_id = Some(bid);
-                        true
-                    }
-                    Some(Block::Image { block_id, .. }) if block_id.is_none() => {
-                        *block_id = Some(bid);
-                        true
-                    }
-                    Some(Block::Table { block_id, .. }) if block_id.is_none() => {
-                        *block_id = Some(bid);
-                        true
-                    }
-                    Some(Block::Divider { block_id, .. }) if block_id.is_none() => {
-                        *block_id = Some(bid);
-                        true
-                    }
-                    _ => false,
-                };
-                if attached {
-                    i += 1;
-                    continue;
-                }
-            }
-        }
-
-        if i + 1 < lines.len() {
-            if let (Some(header_cells), Some(alignments)) = (
-                split_table_row(lines[i]),
-                parse_table_delimiter_row(lines[i + 1]),
-            ) {
-                if !header_cells.is_empty() && header_cells.len() == alignments.len() {
-                    flush_para(
-                        &mut para_lines,
-                        &mut blocks,
-                        &mut counter,
-                        &mut pending_outdent,
-                        &mut pending_col_widths,
-                        &mut pending_color,
-                        &mut pending_bg,
-                    );
-                    let col_count = header_cells.len();
-                    let mut col_widths = std::mem::take(&mut pending_col_widths);
-                    if !col_widths.is_empty() {
-                        col_widths.resize(col_count, 160);
-                    }
-                    let mut rows = vec![header_cells];
-                    i += 2;
-                    while i < lines.len() {
-                        let body_line = lines[i];
-                        let body_trimmed = body_line.trim();
-                        if body_trimmed.is_empty()
-                            || parse_fence_open(body_line).is_some()
-                            || parse_atx_heading(body_line).is_some()
-                            || parse_outdent_comment(body_trimmed).is_some()
-                            || parse_style_comment(body_trimmed).is_some()
-                            || parse_col_widths_comment(body_trimmed).is_some()
-                            || parse_standalone_block_id_line(body_trimmed).is_some()
-                            || parse_quote_line(body_line).is_some()
-                            || parse_todo_line(body_line).is_some()
-                            || parse_bullet_line(body_line).is_some()
-                            || parse_numbered_line(body_line).is_some()
-                            || parse_divider_line(body_trimmed)
-                        {
-                            break;
-                        }
-                        let Some(mut cells) = split_table_row(body_line) else {
-                            break;
-                        };
-                        cells.resize(col_count, String::new());
-                        rows.push(cells);
-                        i += 1;
-                    }
-                    blocks.push(Block::Table {
-                        id: next_id(&mut counter),
-                        block_id: None,
-                        outdent: pending_outdent.take(),
-                        color: pending_color.take(),
-                        bg: pending_bg.take(),
-                        alignments,
-                        col_widths,
-                        rows,
-                    });
-                    continue;
-                }
-            }
-        }
-
-        if para_lines.is_empty() && parse_divider_line(trimmed) {
-            pending_col_widths.clear();
-            blocks.push(Block::Divider {
-                id: next_id(&mut counter),
-                block_id: None,
-                outdent: pending_outdent.take(),
-                color: pending_color.take(),
-                bg: pending_bg.take(),
-            });
-            i += 1;
-            continue;
-        }
-
-        if let Some(first_quote) = parse_quote_line(line) {
-            flush_para(
-                &mut para_lines,
-                &mut blocks,
-                &mut counter,
-                &mut pending_outdent,
-                &mut pending_col_widths,
-                &mut pending_color,
-                &mut pending_bg,
-            );
-            pending_col_widths.clear();
-            let mut quote_lines = vec![first_quote];
-            i += 1;
-            while i < lines.len() {
-                let next_trimmed = lines[i].trim();
-                if next_trimmed.is_empty()
-                    || parse_fence_open(lines[i]).is_some()
-                    || parse_atx_heading(lines[i]).is_some()
-                    || parse_outdent_comment(next_trimmed).is_some()
-                    || parse_style_comment(next_trimmed).is_some()
-                    || parse_col_widths_comment(next_trimmed).is_some()
-                {
-                    break;
-                }
-                if let Some(q_line) = parse_quote_line(lines[i]) {
-                    quote_lines.push(q_line);
-                    i += 1;
-                } else {
-                    break;
-                }
-            }
-            let joined = quote_lines.join("\n");
-            let (clean, block_id) = strip_trailing_block_id(&joined);
-            blocks.push(Block::Quote {
-                id: next_id(&mut counter),
-                block_id,
-                outdent: pending_outdent.take(),
-                color: pending_color.take(),
-                bg: pending_bg.take(),
-                content: clean.to_string(),
-            });
-            continue;
-        }
-
-        if let Some((checked, content)) = parse_todo_line(line) {
-            flush_para(
-                &mut para_lines,
-                &mut blocks,
-                &mut counter,
-                &mut pending_outdent,
-                &mut pending_col_widths,
-                &mut pending_color,
-                &mut pending_bg,
-            );
-            pending_col_widths.clear();
-            let (clean, block_id) = strip_trailing_block_id(&content);
-            blocks.push(Block::Todo {
-                id: next_id(&mut counter),
-                block_id,
-                outdent: pending_outdent.take(),
-                color: pending_color.take(),
-                bg: pending_bg.take(),
-                checked,
-                content: clean.to_string(),
-            });
-            i += 1;
-            continue;
-        }
-
-        if let Some(content) = parse_bullet_line(line) {
-            flush_para(
-                &mut para_lines,
-                &mut blocks,
-                &mut counter,
-                &mut pending_outdent,
-                &mut pending_col_widths,
-                &mut pending_color,
-                &mut pending_bg,
-            );
-            pending_col_widths.clear();
-            let (clean, block_id) = strip_trailing_block_id(&content);
-            blocks.push(Block::BulletList {
-                id: next_id(&mut counter),
-                block_id,
-                outdent: pending_outdent.take(),
-                color: pending_color.take(),
-                bg: pending_bg.take(),
-                content: clean.to_string(),
-            });
-            i += 1;
-            continue;
-        }
-
-        if let Some(content) = parse_numbered_line(line) {
-            flush_para(
-                &mut para_lines,
-                &mut blocks,
-                &mut counter,
-                &mut pending_outdent,
-                &mut pending_col_widths,
-                &mut pending_color,
-                &mut pending_bg,
-            );
-            pending_col_widths.clear();
-            let (clean, block_id) = strip_trailing_block_id(&content);
-            blocks.push(Block::NumberedList {
-                id: next_id(&mut counter),
-                block_id,
-                outdent: pending_outdent.take(),
-                color: pending_color.take(),
-                bg: pending_bg.take(),
-                content: clean.to_string(),
-            });
-            i += 1;
-            continue;
-        }
-
-        if trimmed.is_empty() {
-            flush_para(
-                &mut para_lines,
-                &mut blocks,
-                &mut counter,
-                &mut pending_outdent,
-                &mut pending_col_widths,
-                &mut pending_color,
-                &mut pending_bg,
-            );
-            i += 1;
-            continue;
-        }
-
-        para_lines.push(line);
-        i += 1;
+impl<'a> MarkdownParser<'a> {
+    fn next_block_id(&mut self) -> String {
+        next_id(&mut self.counter)
     }
 
-    flush_para(
-        &mut para_lines,
-        &mut blocks,
-        &mut counter,
-        &mut pending_outdent,
-        &mut pending_col_widths,
-        &mut pending_color,
-        &mut pending_bg,
-    );
-
-    if blocks.is_empty() {
-        blocks.push(Block::Paragraph {
-            id: next_id(&mut counter),
-            block_id: None,
-            outdent: None,
-            color: None,
-            bg: None,
-            content: String::new(),
+    fn flush_paragraph(&mut self) {
+        if self.para_lines.is_empty() {
+            return;
+        }
+        let joined = self.para_lines.join("\n");
+        self.para_lines.clear();
+        self.pending_col_widths.clear();
+        let (clean, block_id) = strip_trailing_block_id(&joined);
+        let id = self.next_block_id();
+        self.blocks.push(Block::Paragraph {
+            id,
+            block_id,
+            outdent: self.pending_outdent.take(),
+            color: self.pending_color.take(),
+            bg: self.pending_bg.take(),
+            content: clean.to_string(),
         });
     }
 
-    blocks
+    fn try_attach_block_id(&mut self, bid: String) -> bool {
+        match self.blocks.last_mut() {
+            Some(Block::Code { block_id, .. })
+            | Some(Block::Image { block_id, .. })
+            | Some(Block::Table { block_id, .. })
+            | Some(Block::Divider { block_id, .. })
+                if block_id.is_none() =>
+            {
+                *block_id = Some(bid);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn parse_table_at(&mut self, lines: &[&'a str], start: usize) -> Option<usize> {
+        if start + 1 >= lines.len() {
+            return None;
+        }
+        let header_cells = split_table_row(lines[start])?;
+        let alignments = parse_table_delimiter_row(lines[start + 1])?;
+        if header_cells.is_empty() || header_cells.len() != alignments.len() {
+            return None;
+        }
+
+        self.flush_paragraph();
+        let col_count = header_cells.len();
+        let mut col_widths = std::mem::take(&mut self.pending_col_widths);
+        if !col_widths.is_empty() {
+            col_widths.resize(col_count, 160);
+        }
+        let mut rows = vec![header_cells];
+        let mut i = start + 2;
+        while i < lines.len() {
+            let body_line = lines[i];
+            let body_trimmed = body_line.trim();
+            if body_trimmed.is_empty()
+                || parse_fence_open(body_line).is_some()
+                || parse_atx_heading(body_line).is_some()
+                || parse_outdent_comment(body_trimmed).is_some()
+                || parse_style_comment(body_trimmed).is_some()
+                || parse_col_widths_comment(body_trimmed).is_some()
+                || parse_standalone_block_id_line(body_trimmed).is_some()
+                || parse_quote_line(body_line).is_some()
+                || parse_todo_line(body_line).is_some()
+                || parse_bullet_line(body_line).is_some()
+                || parse_numbered_line(body_line).is_some()
+                || parse_divider_line(body_trimmed)
+            {
+                break;
+            }
+            let Some(mut cells) = split_table_row(body_line) else {
+                break;
+            };
+            cells.resize(col_count, String::new());
+            rows.push(cells);
+            i += 1;
+        }
+
+        let id = self.next_block_id();
+        self.blocks.push(Block::Table {
+            id,
+            block_id: None,
+            outdent: self.pending_outdent.take(),
+            color: self.pending_color.take(),
+            bg: self.pending_bg.take(),
+            alignments,
+            col_widths,
+            rows,
+        });
+        Some(i)
+    }
+
+    fn parse_lines(&mut self, lines: &[&'a str]) {
+        let mut i = 0usize;
+        while i < lines.len() {
+            let line = lines[i];
+
+            if let Some(fence) = parse_fence_open(line) {
+                self.flush_paragraph();
+                self.pending_col_widths.clear();
+                let mut code_lines = Vec::new();
+                i += 1;
+                while i < lines.len() {
+                    if is_fence_close(lines[i], fence.ch, fence.len) {
+                        i += 1;
+                        break;
+                    }
+                    code_lines.push(lines[i]);
+                    i += 1;
+                }
+                let id = self.next_block_id();
+                self.blocks.push(Block::Code {
+                    id,
+                    block_id: None,
+                    outdent: self.pending_outdent.take(),
+                    color: self.pending_color.take(),
+                    bg: self.pending_bg.take(),
+                    language: fence.language,
+                    content: code_lines.join("\n"),
+                });
+                continue;
+            }
+
+            let trimmed = line.trim();
+            let lower_trimmed = trimmed.to_ascii_lowercase();
+
+            if lower_trimmed.starts_with("<details") || lower_trimmed == "</details>" {
+                self.flush_paragraph();
+                i += 1;
+                continue;
+            }
+
+            if let Some(outdent_val) = parse_outdent_comment(trimmed) {
+                self.flush_paragraph();
+                self.pending_outdent = Some(outdent_val);
+                i += 1;
+                continue;
+            }
+
+            if let Some(style) = parse_style_comment(trimmed) {
+                self.flush_paragraph();
+                self.pending_color = style.color;
+                self.pending_bg = style.bg;
+                i += 1;
+                continue;
+            }
+
+            if let Some(widths) = parse_col_widths_comment(trimmed) {
+                self.flush_paragraph();
+                self.pending_col_widths = widths;
+                i += 1;
+                continue;
+            }
+
+            if let Some(summary) = parse_legacy_summary(trimmed) {
+                self.flush_paragraph();
+                self.pending_outdent = None;
+                self.pending_col_widths.clear();
+                let (clean, block_id) = strip_trailing_block_id(&summary);
+                let id = self.next_block_id();
+                self.blocks.push(Block::Heading {
+                    id,
+                    block_id,
+                    color: self.pending_color.take(),
+                    bg: self.pending_bg.take(),
+                    level: 2,
+                    content: clean.to_string(),
+                });
+                i += 1;
+                continue;
+            }
+
+            if let Some((level, content)) = parse_atx_heading(line) {
+                self.flush_paragraph();
+                self.pending_outdent = None;
+                self.pending_col_widths.clear();
+                let (clean, block_id) = strip_trailing_block_id(&content);
+                let id = self.next_block_id();
+                self.blocks.push(Block::Heading {
+                    id,
+                    block_id,
+                    color: self.pending_color.take(),
+                    bg: self.pending_bg.take(),
+                    level,
+                    content: clean.to_string(),
+                });
+                i += 1;
+                continue;
+            }
+
+            if let Some((src, alt)) = parse_image_line(trimmed) {
+                self.flush_paragraph();
+                self.pending_col_widths.clear();
+                let id = self.next_block_id();
+                self.blocks.push(Block::Image {
+                    id,
+                    block_id: None,
+                    outdent: self.pending_outdent.take(),
+                    color: self.pending_color.take(),
+                    bg: self.pending_bg.take(),
+                    src,
+                    alt,
+                });
+                i += 1;
+                continue;
+            }
+
+            if self.para_lines.is_empty() {
+                if let Some(bid) = parse_standalone_block_id_line(trimmed) {
+                    if self.try_attach_block_id(bid) {
+                        i += 1;
+                        continue;
+                    }
+                }
+            }
+
+            if let Some(next_idx) = self.parse_table_at(lines, i) {
+                i = next_idx;
+                continue;
+            }
+
+            if self.para_lines.is_empty() && parse_divider_line(trimmed) {
+                self.pending_col_widths.clear();
+                let id = self.next_block_id();
+                self.blocks.push(Block::Divider {
+                    id,
+                    block_id: None,
+                    outdent: self.pending_outdent.take(),
+                    color: self.pending_color.take(),
+                    bg: self.pending_bg.take(),
+                });
+                i += 1;
+                continue;
+            }
+
+            if let Some(first_quote) = parse_quote_line(line) {
+                self.flush_paragraph();
+                self.pending_col_widths.clear();
+                let mut quote_lines = vec![first_quote];
+                i += 1;
+                while i < lines.len() {
+                    let next_trimmed = lines[i].trim();
+                    if next_trimmed.is_empty()
+                        || parse_fence_open(lines[i]).is_some()
+                        || parse_atx_heading(lines[i]).is_some()
+                        || parse_outdent_comment(next_trimmed).is_some()
+                        || parse_style_comment(next_trimmed).is_some()
+                        || parse_col_widths_comment(next_trimmed).is_some()
+                    {
+                        break;
+                    }
+                    if let Some(q_line) = parse_quote_line(lines[i]) {
+                        quote_lines.push(q_line);
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                }
+                let joined = quote_lines.join("\n");
+                let (clean, block_id) = strip_trailing_block_id(&joined);
+                let id = self.next_block_id();
+                self.blocks.push(Block::Quote {
+                    id,
+                    block_id,
+                    outdent: self.pending_outdent.take(),
+                    color: self.pending_color.take(),
+                    bg: self.pending_bg.take(),
+                    content: clean.to_string(),
+                });
+                continue;
+            }
+
+            if let Some((checked, content)) = parse_todo_line(line) {
+                self.flush_paragraph();
+                self.pending_col_widths.clear();
+                let (clean, block_id) = strip_trailing_block_id(&content);
+                let id = self.next_block_id();
+                self.blocks.push(Block::Todo {
+                    id,
+                    block_id,
+                    outdent: self.pending_outdent.take(),
+                    color: self.pending_color.take(),
+                    bg: self.pending_bg.take(),
+                    checked,
+                    content: clean.to_string(),
+                });
+                i += 1;
+                continue;
+            }
+
+            if let Some(content) = parse_bullet_line(line) {
+                self.flush_paragraph();
+                self.pending_col_widths.clear();
+                let (clean, block_id) = strip_trailing_block_id(&content);
+                let id = self.next_block_id();
+                self.blocks.push(Block::BulletList {
+                    id,
+                    block_id,
+                    outdent: self.pending_outdent.take(),
+                    color: self.pending_color.take(),
+                    bg: self.pending_bg.take(),
+                    content: clean.to_string(),
+                });
+                i += 1;
+                continue;
+            }
+
+            if let Some(content) = parse_numbered_line(line) {
+                self.flush_paragraph();
+                self.pending_col_widths.clear();
+                let (clean, block_id) = strip_trailing_block_id(&content);
+                let id = self.next_block_id();
+                self.blocks.push(Block::NumberedList {
+                    id,
+                    block_id,
+                    outdent: self.pending_outdent.take(),
+                    color: self.pending_color.take(),
+                    bg: self.pending_bg.take(),
+                    content: clean.to_string(),
+                });
+                i += 1;
+                continue;
+            }
+
+            if trimmed.is_empty() {
+                self.flush_paragraph();
+                i += 1;
+                continue;
+            }
+
+            self.para_lines.push(line);
+            i += 1;
+        }
+
+        self.flush_paragraph();
+
+        if self.blocks.is_empty() {
+            let id = self.next_block_id();
+            self.blocks.push(Block::Paragraph {
+                id,
+                block_id: None,
+                outdent: None,
+                color: None,
+                bg: None,
+                content: String::new(),
+            });
+        }
+    }
+}
+
+/// Parses a Markdown string into Skillweaver editor blocks.
+pub fn parse_markdown(input: &str) -> Vec<Block> {
+    let normalized = input.replace("\r\n", "\n").replace('\r', "\n");
+    let lines: Vec<&str> = normalized.split('\n').collect();
+    let mut parser = MarkdownParser::default();
+    parser.parse_lines(&lines);
+    parser.blocks
 }
 
 fn max_backtick_run(text: &str) -> usize {
@@ -1240,6 +1176,25 @@ fn max_backtick_run(text: &str) -> usize {
         }
     }
     max_run
+}
+
+fn write_block_prefixes(
+    s: &mut String,
+    outdent: Option<u8>,
+    color: Option<&str>,
+    bg: Option<&str>,
+) -> bool {
+    let mut has_prefix = false;
+    if let Some(d) = outdent.filter(|&v| v > 0) {
+        let _ = writeln!(s, "<!-- outdent:{d} -->");
+        has_prefix = true;
+    }
+    if let Some(style) = format_style_comment(color, bg) {
+        s.push_str(&style);
+        s.push('\n');
+        has_prefix = true;
+    }
+    has_prefix
 }
 
 /// Serializes editor blocks back into clean standard Markdown.
@@ -1259,21 +1214,18 @@ pub fn serialize_markdown(blocks: &[Block]) -> String {
     let mut numbered_index = 0usize;
     let mut prev_list_kind: u8 = 0; // 1 = bullet, 2 = numbered, 3 = todo, 0 = other
 
-    let push_serialized = |out: &mut String,
-                           prev_kind: &mut u8,
-                           kind: u8,
-                           has_prefix_comments: bool,
-                           chunk: &str| {
-        if !out.is_empty() {
-            if kind != 0 && *prev_kind == kind && !has_prefix_comments {
-                out.push('\n');
-            } else {
-                out.push_str("\n\n");
+    let push_serialized =
+        |out: &mut String, prev_kind: &mut u8, kind: u8, has_prefix_comments: bool, chunk: &str| {
+            if !out.is_empty() {
+                if kind != 0 && *prev_kind == kind && !has_prefix_comments {
+                    out.push('\n');
+                } else {
+                    out.push_str("\n\n");
+                }
             }
-        }
-        out.push_str(chunk);
-        *prev_kind = kind;
-    };
+            out.push_str(chunk);
+            *prev_kind = kind;
+        };
 
     for block in blocks {
         if !matches!(block, Block::NumberedList { .. }) {
@@ -1291,17 +1243,13 @@ pub fn serialize_markdown(blocks: &[Block]) -> String {
                 let hashes = "#".repeat((*level).clamp(1, 6) as usize);
                 let text = content.trim_end();
                 let mut s = String::new();
-                if let Some(style) = format_style_comment(color.as_deref(), bg.as_deref()) {
-                    s.push_str(&style);
-                    s.push('\n');
+                write_block_prefixes(&mut s, None, color.as_deref(), bg.as_deref());
+                s.push_str(&hashes);
+                if !text.is_empty() {
+                    let _ = write!(s, " {text}");
                 }
-                if text.is_empty() {
-                    s.push_str(&hashes);
-                } else {
-                    s.push_str(&format!("{hashes} {text}"));
-                }
-                if let Some(bid) = block_id.as_deref().filter(|s| !s.is_empty()) {
-                    s.push_str(&format!(" ^{bid}"));
+                if let Some(bid) = block_id.as_deref().filter(|id| !id.is_empty()) {
+                    let _ = write!(s, " ^{bid}");
                 }
                 push_serialized(&mut out, &mut prev_list_kind, 0, false, &s);
             }
@@ -1314,19 +1262,13 @@ pub fn serialize_markdown(blocks: &[Block]) -> String {
                 ..
             } => {
                 let mut s = String::new();
-                if let Some(d) = (*outdent).filter(|&v| v > 0) {
-                    s.push_str(&format!("<!-- outdent:{d} -->\n"));
-                }
-                if let Some(style) = format_style_comment(color.as_deref(), bg.as_deref()) {
-                    s.push_str(&style);
-                    s.push('\n');
-                }
+                write_block_prefixes(&mut s, *outdent, color.as_deref(), bg.as_deref());
                 s.push_str(content);
-                if let Some(bid) = block_id.as_deref().filter(|s| !s.is_empty()) {
+                if let Some(bid) = block_id.as_deref().filter(|id| !id.is_empty()) {
                     if !content.is_empty() {
                         s.push(' ');
                     }
-                    s.push_str(&format!("^{bid}"));
+                    let _ = write!(s, "^{bid}");
                 }
                 push_serialized(&mut out, &mut prev_list_kind, 0, false, &s);
             }
@@ -1339,23 +1281,15 @@ pub fn serialize_markdown(blocks: &[Block]) -> String {
                 ..
             } => {
                 let mut s = String::new();
-                let mut has_prefix = false;
-                if let Some(d) = (*outdent).filter(|&v| v > 0) {
-                    s.push_str(&format!("<!-- outdent:{d} -->\n"));
-                    has_prefix = true;
-                }
-                if let Some(style) = format_style_comment(color.as_deref(), bg.as_deref()) {
-                    s.push_str(&style);
-                    s.push('\n');
-                    has_prefix = true;
-                }
+                let has_prefix =
+                    write_block_prefixes(&mut s, *outdent, color.as_deref(), bg.as_deref());
                 if content.is_empty() {
                     s.push_str("- ");
                 } else {
-                    s.push_str(&format!("- {content}"));
+                    let _ = write!(s, "- {content}");
                 }
-                if let Some(bid) = block_id.as_deref().filter(|s| !s.is_empty()) {
-                    s.push_str(&format!(" ^{bid}"));
+                if let Some(bid) = block_id.as_deref().filter(|id| !id.is_empty()) {
+                    let _ = write!(s, " ^{bid}");
                 }
                 push_serialized(&mut out, &mut prev_list_kind, 1, has_prefix, &s);
             }
@@ -1369,23 +1303,15 @@ pub fn serialize_markdown(blocks: &[Block]) -> String {
             } => {
                 numbered_index += 1;
                 let mut s = String::new();
-                let mut has_prefix = false;
-                if let Some(d) = (*outdent).filter(|&v| v > 0) {
-                    s.push_str(&format!("<!-- outdent:{d} -->\n"));
-                    has_prefix = true;
-                }
-                if let Some(style) = format_style_comment(color.as_deref(), bg.as_deref()) {
-                    s.push_str(&style);
-                    s.push('\n');
-                    has_prefix = true;
-                }
+                let has_prefix =
+                    write_block_prefixes(&mut s, *outdent, color.as_deref(), bg.as_deref());
                 if content.is_empty() {
-                    s.push_str(&format!("{numbered_index}. "));
+                    let _ = write!(s, "{numbered_index}. ");
                 } else {
-                    s.push_str(&format!("{numbered_index}. {content}"));
+                    let _ = write!(s, "{numbered_index}. {content}");
                 }
-                if let Some(bid) = block_id.as_deref().filter(|s| !s.is_empty()) {
-                    s.push_str(&format!(" ^{bid}"));
+                if let Some(bid) = block_id.as_deref().filter(|id| !id.is_empty()) {
+                    let _ = write!(s, " ^{bid}");
                 }
                 push_serialized(&mut out, &mut prev_list_kind, 2, has_prefix, &s);
             }
@@ -1399,24 +1325,16 @@ pub fn serialize_markdown(blocks: &[Block]) -> String {
                 ..
             } => {
                 let mut s = String::new();
-                let mut has_prefix = false;
-                if let Some(d) = (*outdent).filter(|&v| v > 0) {
-                    s.push_str(&format!("<!-- outdent:{d} -->\n"));
-                    has_prefix = true;
-                }
-                if let Some(style) = format_style_comment(color.as_deref(), bg.as_deref()) {
-                    s.push_str(&style);
-                    s.push('\n');
-                    has_prefix = true;
-                }
+                let has_prefix =
+                    write_block_prefixes(&mut s, *outdent, color.as_deref(), bg.as_deref());
                 let mark = if *checked { "x" } else { " " };
                 if content.is_empty() {
-                    s.push_str(&format!("- [{mark}] "));
+                    let _ = write!(s, "- [{mark}] ");
                 } else {
-                    s.push_str(&format!("- [{mark}] {content}"));
+                    let _ = write!(s, "- [{mark}] {content}");
                 }
-                if let Some(bid) = block_id.as_deref().filter(|s| !s.is_empty()) {
-                    s.push_str(&format!(" ^{bid}"));
+                if let Some(bid) = block_id.as_deref().filter(|id| !id.is_empty()) {
+                    let _ = write!(s, " ^{bid}");
                 }
                 push_serialized(&mut out, &mut prev_list_kind, 3, has_prefix, &s);
             }
@@ -1429,30 +1347,23 @@ pub fn serialize_markdown(blocks: &[Block]) -> String {
                 ..
             } => {
                 let mut s = String::new();
-                if let Some(d) = (*outdent).filter(|&v| v > 0) {
-                    s.push_str(&format!("<!-- outdent:{d} -->\n"));
-                }
-                if let Some(style) = format_style_comment(color.as_deref(), bg.as_deref()) {
-                    s.push_str(&style);
-                    s.push('\n');
-                }
-                let quote_lines: Vec<String> = if content.is_empty() {
-                    vec![">".to_string()]
+                write_block_prefixes(&mut s, *outdent, color.as_deref(), bg.as_deref());
+                if content.is_empty() {
+                    s.push('>');
                 } else {
-                    content
-                        .split('\n')
-                        .map(|line| {
-                            if line.is_empty() {
-                                ">".to_string()
-                            } else {
-                                format!("> {line}")
-                            }
-                        })
-                        .collect()
-                };
-                s.push_str(&quote_lines.join("\n"));
-                if let Some(bid) = block_id.as_deref().filter(|s| !s.is_empty()) {
-                    s.push_str(&format!(" ^{bid}"));
+                    for (idx, line) in content.split('\n').enumerate() {
+                        if idx > 0 {
+                            s.push('\n');
+                        }
+                        if line.is_empty() {
+                            s.push('>');
+                        } else {
+                            let _ = write!(s, "> {line}");
+                        }
+                    }
+                }
+                if let Some(bid) = block_id.as_deref().filter(|id| !id.is_empty()) {
+                    let _ = write!(s, " ^{bid}");
                 }
                 push_serialized(&mut out, &mut prev_list_kind, 0, false, &s);
             }
@@ -1464,16 +1375,10 @@ pub fn serialize_markdown(blocks: &[Block]) -> String {
                 ..
             } => {
                 let mut s = String::new();
-                if let Some(d) = (*outdent).filter(|&v| v > 0) {
-                    s.push_str(&format!("<!-- outdent:{d} -->\n"));
-                }
-                if let Some(style) = format_style_comment(color.as_deref(), bg.as_deref()) {
-                    s.push_str(&style);
-                    s.push('\n');
-                }
+                write_block_prefixes(&mut s, *outdent, color.as_deref(), bg.as_deref());
                 s.push_str("---");
-                if let Some(bid) = block_id.as_deref().filter(|s| !s.is_empty()) {
-                    s.push_str(&format!("\n^{bid}"));
+                if let Some(bid) = block_id.as_deref().filter(|id| !id.is_empty()) {
+                    let _ = write!(s, "\n^{bid}");
                 }
                 push_serialized(&mut out, &mut prev_list_kind, 0, false, &s);
             }
@@ -1490,20 +1395,14 @@ pub fn serialize_markdown(blocks: &[Block]) -> String {
                 let fence = "`".repeat(fence_len);
                 let lang = language.trim();
                 let mut s = String::new();
-                if let Some(d) = (*outdent).filter(|&v| v > 0) {
-                    s.push_str(&format!("<!-- outdent:{d} -->\n"));
-                }
-                if let Some(style) = format_style_comment(color.as_deref(), bg.as_deref()) {
-                    s.push_str(&style);
-                    s.push('\n');
-                }
+                write_block_prefixes(&mut s, *outdent, color.as_deref(), bg.as_deref());
                 if content.is_empty() {
-                    s.push_str(&format!("{fence}{lang}\n{fence}"));
+                    let _ = write!(s, "{fence}{lang}\n{fence}");
                 } else {
-                    s.push_str(&format!("{fence}{lang}\n{content}\n{fence}"));
+                    let _ = write!(s, "{fence}{lang}\n{content}\n{fence}");
                 }
-                if let Some(bid) = block_id.as_deref().filter(|s| !s.is_empty()) {
-                    s.push_str(&format!("\n^{bid}"));
+                if let Some(bid) = block_id.as_deref().filter(|id| !id.is_empty()) {
+                    let _ = write!(s, "\n^{bid}");
                 }
                 push_serialized(&mut out, &mut prev_list_kind, 0, false, &s);
             }
@@ -1517,22 +1416,15 @@ pub fn serialize_markdown(blocks: &[Block]) -> String {
                 ..
             } => {
                 let safe_alt = alt.replace(']', "\\]");
-                let formatted_src = if src.chars().any(char::is_whitespace) {
-                    format!("<{src}>")
-                } else {
-                    src.clone()
-                };
                 let mut s = String::new();
-                if let Some(d) = (*outdent).filter(|&v| v > 0) {
-                    s.push_str(&format!("<!-- outdent:{d} -->\n"));
+                write_block_prefixes(&mut s, *outdent, color.as_deref(), bg.as_deref());
+                if src.chars().any(char::is_whitespace) {
+                    let _ = write!(s, "![{safe_alt}](<{src}>)");
+                } else {
+                    let _ = write!(s, "![{safe_alt}]({src})");
                 }
-                if let Some(style) = format_style_comment(color.as_deref(), bg.as_deref()) {
-                    s.push_str(&style);
-                    s.push('\n');
-                }
-                s.push_str(&format!("![{safe_alt}]({formatted_src})"));
-                if let Some(bid) = block_id.as_deref().filter(|s| !s.is_empty()) {
-                    s.push_str(&format!("\n^{bid}"));
+                if let Some(bid) = block_id.as_deref().filter(|id| !id.is_empty()) {
+                    let _ = write!(s, "\n^{bid}");
                 }
                 push_serialized(&mut out, &mut prev_list_kind, 0, false, &s);
             }
@@ -1598,10 +1490,16 @@ pub fn serialize_markdown(blocks: &[Block]) -> String {
                     lines_out.push(format_row(body_row));
                 }
 
-                if let Some(bid) = block_id.as_deref().filter(|s| !s.is_empty()) {
+                if let Some(bid) = block_id.as_deref().filter(|id| !id.is_empty()) {
                     lines_out.push(format!("^{bid}"));
                 }
-                push_serialized(&mut out, &mut prev_list_kind, 0, false, &lines_out.join("\n"));
+                push_serialized(
+                    &mut out,
+                    &mut prev_list_kind,
+                    0,
+                    false,
+                    &lines_out.join("\n"),
+                );
             }
         }
     }
@@ -1784,6 +1682,20 @@ fn normalize_link_cmp(s: &str) -> String {
         .to_ascii_lowercase()
 }
 
+/// Controls whether bare `[[Page]]` wikilinks matching only the basename are rewritten.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BasenameMatch {
+    UniqueOnly,
+    IgnoreAmbiguous,
+}
+
+/// Outcome of rewriting `[[wikilinks]]` inside a Markdown document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RewriteResult {
+    pub markdown: String,
+    pub changed: bool,
+}
+
 /// Rewrites `[[old_target]]` (and unique `[[old_basename]]`) wikilinks to `[[new_target]]`
 /// outside code blocks and inline code spans.
 pub fn rewrite_wikilinks(
@@ -1791,10 +1703,11 @@ pub fn rewrite_wikilinks(
     old_target: &str,
     old_basename: &str,
     new_target: &str,
-    is_old_basename_unique: bool,
-) -> (String, bool) {
+    basename_match: BasenameMatch,
+) -> RewriteResult {
     let old_norm = normalize_link_cmp(old_target);
     let base_norm = normalize_link_cmp(old_basename);
+    let allow_basename = basename_match == BasenameMatch::UniqueOnly;
     let mut changed = false;
 
     let updated = process_non_code_segments(markdown, |seg| {
@@ -1816,7 +1729,7 @@ pub fn rewrite_wikilinks(
                         };
                         let cmp = normalize_link_cmp(path_part);
                         let matches = cmp == old_norm
-                            || (is_old_basename_unique && !cmp.contains('/') && cmp == base_norm);
+                            || (allow_basename && !cmp.contains('/') && cmp == base_norm);
                         if matches {
                             changed = true;
                             out.push_str("[[");
@@ -1849,7 +1762,10 @@ pub fn rewrite_wikilinks(
         out
     });
 
-    (updated, changed)
+    RewriteResult {
+        markdown: updated,
+        changed,
+    }
 }
 
 /// Extracts a concise single-line snippet around the first line mentioning `target_needle`.
@@ -2046,12 +1962,19 @@ Link [[notes/old]] and [[old|Custom]] and `[[notes/old]]`.
 [[notes/old]]
 ```
 ";
-        let (updated, changed) =
-            rewrite_wikilinks(md, "notes/old", "old", "notes/new_name", true);
-        assert!(changed);
-        assert!(updated.contains("Link [[notes/new_name]] and [[notes/new_name|Custom]]"));
-        assert!(updated.contains("`[[notes/old]]`"));
-        assert!(updated.contains("```\n[[notes/old]]\n```"));
+        let res = rewrite_wikilinks(
+            md,
+            "notes/old",
+            "old",
+            "notes/new_name",
+            BasenameMatch::UniqueOnly,
+        );
+        assert!(res.changed);
+        assert!(res
+            .markdown
+            .contains("Link [[notes/new_name]] and [[notes/new_name|Custom]]"));
+        assert!(res.markdown.contains("`[[notes/old]]`"));
+        assert!(res.markdown.contains("```\n[[notes/old]]\n```"));
     }
 
     #[test]
@@ -2187,7 +2110,12 @@ SELECT 1;
                 assert_eq!(rows[0], vec!["Feature", "Status", "Link", "Notes"]);
                 assert_eq!(
                     rows[1],
-                    vec!["**Tables**", "`ready`", "[[notes/plan|Plan]]", "a | b\nline2"]
+                    vec![
+                        "**Tables**",
+                        "`ready`",
+                        "[[notes/plan|Plan]]",
+                        "a | b\nline2"
+                    ]
                 );
                 assert_eq!(rows[2], vec!["==Highlights==", "done", "[[hero]]", "100"]);
             }
@@ -2270,10 +2198,17 @@ Not A Table
             }]
         );
 
-        let (updated, changed) =
-            rewrite_wikilinks(md, "notes/old", "old", "notes/new_spec", true);
-        assert!(changed);
-        assert!(updated.contains("| Spec | [[notes/new_spec|Old Spec]] |"));
+        let res = rewrite_wikilinks(
+            md,
+            "notes/old",
+            "old",
+            "notes/new_spec",
+            BasenameMatch::UniqueOnly,
+        );
+        assert!(res.changed);
+        assert!(res
+            .markdown
+            .contains("| Spec | [[notes/new_spec|Old Spec]] |"));
     }
 
     #[test]

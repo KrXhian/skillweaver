@@ -1,4 +1,18 @@
-use crate::markdown::{extract_links, extract_snippet, parse_markdown, rewrite_wikilinks, serialize_markdown, Block};
+// Copyright 2026 Blue Frog Foundation
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use crate::markdown::{self, Block};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -80,6 +94,27 @@ pub struct VaultGraph {
     pub edges: Vec<GraphEdge>,
 }
 
+/// Note whose incoming wikilinks were rewritten during a rename or move.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RewrittenNote {
+    pub rel_path: String,
+    pub content_hash: String,
+}
+
+/// Result of renaming or moving a vault entry with tracked wikilink rewrites.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenameOutcome {
+    pub new_rel_path: String,
+    pub rewritten_notes: Vec<RewrittenNote>,
+}
+
+/// Result of saving a pasted image into the vault's `assets/` folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedPastedImage {
+    pub markdown_src: String,
+    pub data_url: String,
+}
+
 /// Complete snapshot of an opened folder/vault.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VaultSnapshot {
@@ -91,7 +126,9 @@ pub struct VaultSnapshot {
 }
 
 fn is_ignored_name(name: &str) -> bool {
-    name.starts_with('.') || name.eq_ignore_ascii_case("node_modules") || name.eq_ignore_ascii_case("target")
+    name.starts_with('.')
+        || name.eq_ignore_ascii_case("node_modules")
+        || name.eq_ignore_ascii_case("target")
 }
 
 fn is_markdown_file(path: &Path) -> bool {
@@ -123,7 +160,10 @@ pub fn normalize_rel_path(rel: &str) -> Result<String, String> {
         return Err("Invalid path: null byte not allowed".to_string());
     }
     let replaced = rel.replace('\\', "/");
-    let trimmed = replaced.trim().trim_start_matches('/').trim_end_matches('/');
+    let trimmed = replaced
+        .trim()
+        .trim_start_matches('/')
+        .trim_end_matches('/');
     if trimmed.is_empty() {
         return Err("Path cannot be empty".to_string());
     }
@@ -182,7 +222,12 @@ pub fn resolve_vault_path(root: &Path, rel: &str) -> Result<PathBuf, String> {
     Ok(candidate)
 }
 
-fn build_tree_dir(root: &Path, dir: &Path, rel_prefix: &str) -> Result<Vec<FileTreeNode>, String> {
+fn build_tree_dir(
+    canon_root: &Path,
+    dir: &Path,
+    rel_prefix: &str,
+    visited: &mut HashSet<PathBuf>,
+) -> Result<Vec<FileTreeNode>, String> {
     let entries = fs::read_dir(dir)
         .map_err(|e| format!("Failed to read directory {}: {e}", dir.display()))?;
 
@@ -190,27 +235,21 @@ fn build_tree_dir(root: &Path, dir: &Path, rel_prefix: &str) -> Result<Vec<FileT
     let mut files = Vec::new();
 
     for entry_res in entries {
-        let entry = match entry_res {
-            Ok(e) => e,
-            Err(_) => continue,
+        let Ok(entry) = entry_res else {
+            continue;
         };
         let file_name = entry.file_name().to_string_lossy().to_string();
         if is_ignored_name(&file_name) {
             continue;
         }
-        let file_type = match entry.file_type() {
-            Ok(ft) => ft,
-            Err(_) => continue,
+        let Ok(file_type) = entry.file_type() else {
+            continue;
         };
-        // Skip symlinks pointing outside root
         if file_type.is_symlink() {
             let Ok(canon_entry) = fs::canonicalize(entry.path()) else {
                 continue;
             };
-            let Ok(canon_root) = fs::canonicalize(root) else {
-                continue;
-            };
-            if !canon_entry.starts_with(&canon_root) {
+            if !canon_entry.starts_with(canon_root) {
                 continue;
             }
         }
@@ -221,9 +260,19 @@ fn build_tree_dir(root: &Path, dir: &Path, rel_prefix: &str) -> Result<Vec<FileT
             format!("{rel_prefix}/{file_name}")
         };
 
-        if entry.path().is_dir() {
-            let children = build_tree_dir(root, &entry.path(), &rel_path)?;
-            if rel_prefix.is_empty() && file_name.eq_ignore_ascii_case("assets") && children.is_empty() {
+        let entry_path = entry.path();
+        if entry_path.is_dir() {
+            let Ok(canon_dir) = fs::canonicalize(&entry_path) else {
+                continue;
+            };
+            if !canon_dir.starts_with(canon_root) || !visited.insert(canon_dir) {
+                continue;
+            }
+            let children = build_tree_dir(canon_root, &entry_path, &rel_path, visited)?;
+            if rel_prefix.is_empty()
+                && file_name.eq_ignore_ascii_case("assets")
+                && children.is_empty()
+            {
                 continue;
             }
             dirs.push(FileTreeNode {
@@ -232,7 +281,7 @@ fn build_tree_dir(root: &Path, dir: &Path, rel_prefix: &str) -> Result<Vec<FileT
                 is_dir: true,
                 children,
             });
-        } else if entry.path().is_file() && is_markdown_file(&entry.path()) {
+        } else if entry_path.is_file() && is_markdown_file(&entry_path) {
             files.push(FileTreeNode {
                 name: file_name,
                 rel_path,
@@ -243,7 +292,9 @@ fn build_tree_dir(root: &Path, dir: &Path, rel_prefix: &str) -> Result<Vec<FileT
     }
 
     let cmp_name = |a: &FileTreeNode, b: &FileTreeNode| -> Ordering {
-        a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase())
+        a.name
+            .to_ascii_lowercase()
+            .cmp(&b.name.to_ascii_lowercase())
     };
     dirs.sort_by(cmp_name);
     files.sort_by(cmp_name);
@@ -257,7 +308,11 @@ pub fn build_tree(root: &Path) -> Result<Vec<FileTreeNode>, String> {
     if !root.is_dir() {
         return Err(format!("Folder does not exist: {}", root.display()));
     }
-    build_tree_dir(root, root, "")
+    let canon_root = fs::canonicalize(root)
+        .map_err(|e| format!("Invalid vault root {}: {e}", root.display()))?;
+    let mut visited = HashSet::new();
+    visited.insert(canon_root.clone());
+    build_tree_dir(&canon_root, &canon_root, "", &mut visited)
 }
 
 fn should_visit_entry(entry: &DirEntry, root_depth: usize) -> bool {
@@ -283,9 +338,8 @@ pub fn list_pages(root: &Path) -> Result<Vec<PageEntry>, String> {
         .filter_entry(|e| should_visit_entry(e, 0));
 
     for entry_res in walker {
-        let entry = match entry_res {
-            Ok(e) => e,
-            Err(_) => continue,
+        let Ok(entry) = entry_res else {
+            continue;
         };
         if !entry.file_type().is_file() || !is_markdown_file(entry.path()) {
             continue;
@@ -390,12 +444,19 @@ pub fn snapshot_vault(root: &Path, remembered_file: Option<&str>) -> Result<Vaul
     })
 }
 
-pub fn read_note(root: &Path, rel_path: &str) -> Result<String, String> {
-    let full = resolve_vault_path(root, rel_path)?;
+pub fn read_note(root: &Path, rel_path: &str) -> crate::error::Result<String> {
+    let full = resolve_vault_path(root, rel_path).map_err(crate::error::Error::InvalidPath)?;
     if !full.is_file() {
-        return Err(format!("Note does not exist: {rel_path}"));
+        if full.exists() {
+            return Err(crate::error::Error::InvalidPath(format!(
+                "Path is not a file: {rel_path}"
+            )));
+        }
+        return Err(crate::error::Error::NotFound(format!(
+            "Note does not exist: {rel_path}"
+        )));
     }
-    fs::read_to_string(&full).map_err(|e| format!("Failed to read {rel_path}: {e}"))
+    fs::read_to_string(&full).map_err(crate::error::Error::from)
 }
 
 /// Computes a fast deterministic 64-bit FNV-1a hex hash of file contents.
@@ -419,11 +480,8 @@ pub fn read_note_mtime_ms(root: &Path, rel_path: &str) -> Option<u64> {
 
 pub fn write_note(root: &Path, rel_path: &str, content: &str) -> Result<(), String> {
     let full = resolve_vault_path(root, rel_path)?;
-    if let Some(parent) = full.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create parent folder: {e}"))?;
-    }
-    fs::write(&full, content).map_err(|e| format!("Failed to save {rel_path}: {e}"))
+    crate::fs_util::write_atomic(&full, content.as_bytes())
+        .map_err(|e| format!("Failed to save {rel_path}: {e}"))
 }
 
 pub fn create_note(root: &Path, rel_path: &str) -> Result<String, String> {
@@ -432,11 +490,8 @@ pub fn create_note(root: &Path, rel_path: &str) -> Result<String, String> {
     if full.exists() {
         return Err(format!("Note already exists: {normalized}"));
     }
-    if let Some(parent) = full.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create parent folder: {e}"))?;
-    }
-    fs::write(&full, "").map_err(|e| format!("Failed to create {normalized}: {e}"))?;
+    crate::fs_util::write_atomic(&full, b"")
+        .map_err(|e| format!("Failed to create {normalized}: {e}"))?;
     Ok(normalized)
 }
 
@@ -450,40 +505,59 @@ pub fn create_folder(root: &Path, rel_path: &str) -> Result<String, String> {
     Ok(normalized)
 }
 
-fn rewrite_links_across_vault(
+struct LinkRewriteSpec {
+    old_target: String,
+    old_basename: String,
+    new_target: String,
+    basename_match: markdown::BasenameMatch,
+}
+
+fn rewrite_links_across_vault_batch(
     root: &Path,
-    old_target: &str,
-    old_basename: &str,
-    new_target: &str,
-    is_old_basename_unique: bool,
-) -> Result<Vec<(String, String)>, String> {
+    specs: &[LinkRewriteSpec],
+) -> Result<Vec<RewrittenNote>, String> {
+    if specs.is_empty() {
+        return Ok(Vec::new());
+    }
     let pages = list_pages(root)?;
     let mut rewritten = Vec::new();
     for page in pages {
-        if let Ok(content) = read_note(root, &page.rel_path) {
-            let (updated, changed) = rewrite_wikilinks(
-                &content,
-                old_target,
-                old_basename,
-                new_target,
-                is_old_basename_unique,
+        let Ok(original) = read_note(root, &page.rel_path) else {
+            continue;
+        };
+        let mut current = original;
+        let mut any_changed = false;
+        for spec in specs {
+            let res = markdown::rewrite_wikilinks(
+                &current,
+                &spec.old_target,
+                &spec.old_basename,
+                &spec.new_target,
+                spec.basename_match,
             );
-            if changed {
-                write_note(root, &page.rel_path, &updated)?;
-                rewritten.push((page.rel_path, content_hash(&updated)));
+            if res.changed {
+                current = res.markdown;
+                any_changed = true;
             }
+        }
+        if any_changed {
+            write_note(root, &page.rel_path, &current)?;
+            rewritten.push(RewrittenNote {
+                rel_path: page.rel_path,
+                content_hash: content_hash(&current),
+            });
         }
     }
     Ok(rewritten)
 }
 
 /// Renames a `.md` file or folder inside the vault, updating incoming `[[wikilinks]]`
-/// and returning `(new_rel_path, Vec<(rewritten_rel_path, content_hash)>)`.
+/// in a single vault pass and returning the new path alongside hashes of rewritten notes.
 pub fn rename_entry_tracked(
     root: &Path,
     old_rel: &str,
     new_rel: &str,
-) -> Result<(String, Vec<(String, String)>), String> {
+) -> Result<RenameOutcome, String> {
     let old_norm = normalize_rel_path(old_rel)?;
     let old_full = resolve_vault_path(root, &old_norm)?;
     if !old_full.exists() {
@@ -498,7 +572,10 @@ pub fn rename_entry_tracked(
     };
 
     if old_norm.eq_ignore_ascii_case(&new_norm) && old_norm == new_norm {
-        return Ok((new_norm, Vec::new()));
+        return Ok(RenameOutcome {
+            new_rel_path: new_norm,
+            rewritten_notes: Vec::new(),
+        });
     }
 
     if is_dir
@@ -526,7 +603,7 @@ pub fn rename_entry_tracked(
     fs::rename(&old_full, &new_full)
         .map_err(|e| format!("Failed to rename {old_norm} to {new_norm}: {e}"))?;
 
-    let mut rewritten = Vec::new();
+    let mut specs = Vec::new();
     if !is_dir && is_markdown_file(&new_full) {
         let old_target = strip_md_ext(&old_norm);
         let new_target = strip_md_ext(&new_norm);
@@ -535,13 +612,16 @@ pub fn rename_entry_tracked(
             .iter()
             .filter(|p| p.title.eq_ignore_ascii_case(old_basename))
             .count();
-        rewritten.extend(rewrite_links_across_vault(
-            root,
-            &old_target,
-            old_basename,
-            &new_target,
-            basename_count <= 1,
-        )?);
+        specs.push(LinkRewriteSpec {
+            old_target: old_target.clone(),
+            old_basename: old_basename.to_string(),
+            new_target,
+            basename_match: if basename_count <= 1 {
+                markdown::BasenameMatch::UniqueOnly
+            } else {
+                markdown::BasenameMatch::IgnoreAmbiguous
+            },
+        });
     } else if is_dir {
         let prefix = format!("{old_norm}/");
         for page in &pages_before {
@@ -554,23 +634,30 @@ pub fn rename_entry_tracked(
                     .iter()
                     .filter(|p| p.title.eq_ignore_ascii_case(old_basename))
                     .count();
-                rewritten.extend(rewrite_links_across_vault(
-                    root,
-                    &old_target,
-                    old_basename,
-                    &new_target,
-                    basename_count <= 1,
-                )?);
+                specs.push(LinkRewriteSpec {
+                    old_target: old_target.clone(),
+                    old_basename: old_basename.to_string(),
+                    new_target,
+                    basename_match: if basename_count <= 1 {
+                        markdown::BasenameMatch::UniqueOnly
+                    } else {
+                        markdown::BasenameMatch::IgnoreAmbiguous
+                    },
+                });
             }
         }
     }
 
-    Ok((new_norm, rewritten))
+    let rewritten_notes = rewrite_links_across_vault_batch(root, &specs)?;
+    Ok(RenameOutcome {
+        new_rel_path: new_norm,
+        rewritten_notes,
+    })
 }
 
 /// Renames a `.md` file or folder inside the vault, automatically updating incoming `[[wikilinks]]`.
 pub fn rename_entry(root: &Path, old_rel: &str, new_rel: &str) -> Result<String, String> {
-    rename_entry_tracked(root, old_rel, new_rel).map(|(new_norm, _)| new_norm)
+    rename_entry_tracked(root, old_rel, new_rel).map(|outcome| outcome.new_rel_path)
 }
 
 pub fn delete_entry(root: &Path, rel_path: &str) -> Result<(), String> {
@@ -598,74 +685,96 @@ fn clean_link_target(raw_target: &str) -> String {
     strip_md_ext(trimmed)
 }
 
+struct PageIndex<'a> {
+    by_link_target: HashMap<String, &'a PageEntry>,
+    by_title: HashMap<String, Vec<&'a PageEntry>>,
+}
+
+impl<'a> PageIndex<'a> {
+    fn new(pages: &'a [PageEntry]) -> Self {
+        let mut by_link_target = HashMap::with_capacity(pages.len());
+        let mut by_title: HashMap<String, Vec<&'a PageEntry>> = HashMap::new();
+        for page in pages {
+            by_link_target
+                .entry(page.link_target.to_ascii_lowercase())
+                .or_insert(page);
+            by_title
+                .entry(page.title.to_ascii_lowercase())
+                .or_default()
+                .push(page);
+        }
+        Self {
+            by_link_target,
+            by_title,
+        }
+    }
+
+    fn resolve(&self, current_rel: Option<&str>, raw_target: &str) -> Option<String> {
+        let target = clean_link_target(raw_target);
+        if target.is_empty() {
+            return None;
+        }
+        let target_lower = target.to_ascii_lowercase();
+
+        // 1. Exact vault-relative `link_target` match (case-insensitive)
+        if let Some(found) = self.by_link_target.get(&target_lower) {
+            return Some(found.rel_path.clone());
+        }
+
+        let current_folder = current_rel
+            .and_then(|r| normalize_rel_path(r).ok())
+            .and_then(|r| r.rsplit_once('/').map(|(dir, _)| dir.to_string()))
+            .unwrap_or_default();
+
+        // 2. Relative to current file's folder
+        if !current_folder.is_empty() {
+            let rel_candidate = format!("{}/{}", current_folder.to_ascii_lowercase(), target_lower);
+            if let Some(found) = self.by_link_target.get(&rel_candidate) {
+                return Some(found.rel_path.clone());
+            }
+        }
+
+        // 3. Basename match (prefer same folder, then shortest rel_path)
+        let basename_lower = target_lower.rsplit('/').next().unwrap_or(&target_lower);
+        let matches = self.by_title.get(basename_lower)?;
+        let best = matches.iter().copied().min_by(|a, b| {
+            let a_same = a.folder.eq_ignore_ascii_case(&current_folder);
+            let b_same = b.folder.eq_ignore_ascii_case(&current_folder);
+            b_same
+                .cmp(&a_same)
+                .then_with(|| a.rel_path.len().cmp(&b.rel_path.len()))
+                .then_with(|| {
+                    a.rel_path
+                        .to_ascii_lowercase()
+                        .cmp(&b.rel_path.to_ascii_lowercase())
+                })
+        })?;
+
+        Some(best.rel_path.clone())
+    }
+}
+
 /// Resolves a wikilink or relative markdown link target to a vault-relative `.md` path.
 pub fn resolve_link(
     root: &Path,
     current_rel: Option<&str>,
     raw_target: &str,
 ) -> Result<Option<String>, String> {
-    let target = clean_link_target(raw_target);
-    if target.is_empty() {
+    if clean_link_target(raw_target).is_empty() {
         return Ok(None);
     }
-
     let pages = list_pages(root)?;
-
-    // 1. Exact vault-relative `link_target` match (case-insensitive)
-    if let Some(found) = pages
-        .iter()
-        .find(|p| p.link_target.eq_ignore_ascii_case(&target))
-    {
-        return Ok(Some(found.rel_path.clone()));
-    }
-
-    let current_folder = current_rel
-        .and_then(|r| normalize_rel_path(r).ok())
-        .and_then(|r| r.rsplit_once('/').map(|(dir, _)| dir.to_string()))
-        .unwrap_or_default();
-
-    // 2. Relative to current file's folder
-    if !current_folder.is_empty() {
-        let rel_candidate = format!("{current_folder}/{target}");
-        if let Some(found) = pages
-            .iter()
-            .find(|p| p.link_target.eq_ignore_ascii_case(&rel_candidate))
-        {
-            return Ok(Some(found.rel_path.clone()));
-        }
-    }
-
-    // 3. Basename match (prefer same folder, then shortest rel_path)
-    let basename = target.rsplit('/').next().unwrap_or(&target);
-    let mut matches: Vec<&PageEntry> = pages
-        .iter()
-        .filter(|p| p.title.eq_ignore_ascii_case(basename))
-        .collect();
-    if matches.is_empty() {
-        return Ok(None);
-    }
-
-    matches.sort_by(|a, b| {
-        let a_same = a.folder.eq_ignore_ascii_case(&current_folder);
-        let b_same = b.folder.eq_ignore_ascii_case(&current_folder);
-        b_same
-            .cmp(&a_same)
-            .then_with(|| a.rel_path.len().cmp(&b.rel_path.len()))
-            .then_with(|| {
-                a.rel_path
-                    .to_ascii_lowercase()
-                    .cmp(&b.rel_path.to_ascii_lowercase())
-            })
-    });
-
-    Ok(Some(matches[0].rel_path.clone()))
+    Ok(PageIndex::new(&pages).resolve(current_rel, raw_target))
 }
 
 /// Finds all notes in the vault that link to `target_rel`.
 pub fn find_backlinks(root: &Path, target_rel: &str) -> Result<Vec<BacklinkEntry>, String> {
     let target_norm = normalize_rel_path(target_rel)?;
     let target_no_ext = strip_md_ext(&target_norm);
-    let pages = list_pages(root)?;
+    let canon_root = fs::canonicalize(root)
+        .map_err(|e| format!("Invalid vault root {}: {e}", root.display()))?;
+    let pages = list_pages(&canon_root)?;
+    let index = PageIndex::new(&pages);
     let mut backlinks = Vec::new();
     let mut seen_sources = HashSet::new();
 
@@ -673,14 +782,14 @@ pub fn find_backlinks(root: &Path, target_rel: &str) -> Result<Vec<BacklinkEntry
         if page.rel_path.eq_ignore_ascii_case(&target_norm) {
             continue;
         }
-        let Ok(content) = read_note(root, &page.rel_path) else {
+        let Ok(content) = fs::read_to_string(canon_root.join(&page.rel_path)) else {
             continue;
         };
-        let links = extract_links(&content);
+        let links = markdown::extract_links(&content);
         let mut matched_needle: Option<String> = None;
 
         for link in links {
-            if let Ok(Some(resolved)) = resolve_link(root, Some(&page.rel_path), &link.target) {
+            if let Some(resolved) = index.resolve(Some(&page.rel_path), &link.target) {
                 if resolved.eq_ignore_ascii_case(&target_norm) {
                     matched_needle = Some(link.target);
                     break;
@@ -690,8 +799,10 @@ pub fn find_backlinks(root: &Path, target_rel: &str) -> Result<Vec<BacklinkEntry
 
         if let Some(needle) = matched_needle {
             if seen_sources.insert(page.rel_path.to_ascii_lowercase()) {
-                let snippet = extract_snippet(&content, &needle)
-                    .if_empty_then(|| extract_snippet(&content, &target_no_ext));
+                let mut snippet = markdown::extract_snippet(&content, &needle);
+                if snippet.is_empty() {
+                    snippet = markdown::extract_snippet(&content, &target_no_ext);
+                }
                 backlinks.push(BacklinkEntry {
                     source_rel_path: page.rel_path.clone(),
                     source_title: page.title.clone(),
@@ -702,92 +813,6 @@ pub fn find_backlinks(root: &Path, target_rel: &str) -> Result<Vec<BacklinkEntry
     }
 
     Ok(backlinks)
-}
-
-const B64_ALPHABET: &[u8; 64] =
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-/// Encodes raw bytes as standard Base64.
-pub fn base64_encode(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
-        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-
-        out.push(B64_ALPHABET[((triple >> 18) & 0x3F) as usize] as char);
-        out.push(B64_ALPHABET[((triple >> 12) & 0x3F) as usize] as char);
-        if chunk.len() > 1 {
-            out.push(B64_ALPHABET[((triple >> 6) & 0x3F) as usize] as char);
-        } else {
-            out.push('=');
-        }
-        if chunk.len() > 2 {
-            out.push(B64_ALPHABET[(triple & 0x3F) as usize] as char);
-        } else {
-            out.push('=');
-        }
-    }
-    out
-}
-
-/// Decodes standard Base64 (ignoring ASCII whitespace).
-pub fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
-    let clean: Vec<u8> = input
-        .bytes()
-        .filter(|b| !b.is_ascii_whitespace())
-        .collect();
-    if clean.is_empty() {
-        return Ok(Vec::new());
-    }
-    if clean.len() % 4 != 0 {
-        return Err("Invalid base64 length".to_string());
-    }
-
-    let val = |b: u8| -> Result<u8, String> {
-        match b {
-            b'A'..=b'Z' => Ok(b - b'A'),
-            b'a'..=b'z' => Ok(b - b'a' + 26),
-            b'0'..=b'9' => Ok(b - b'0' + 52),
-            b'+' => Ok(62),
-            b'/' => Ok(63),
-            _ => Err("Invalid base64 character".to_string()),
-        }
-    };
-
-    let mut out = Vec::with_capacity((clean.len() / 4) * 3);
-    for (idx, chunk) in clean.chunks_exact(4).enumerate() {
-        let is_last = idx == clean.len() / 4 - 1;
-        if chunk[0] == b'=' || chunk[1] == b'=' {
-            return Err("Invalid base64 padding".to_string());
-        }
-        let v0 = val(chunk[0])? as u32;
-        let v1 = val(chunk[1])? as u32;
-
-        match (chunk[2], chunk[3]) {
-            (b'=', b'=') if is_last => {
-                let triple = (v0 << 18) | (v1 << 12);
-                out.push(((triple >> 16) & 0xFF) as u8);
-            }
-            (c2, b'=') if is_last => {
-                let v2 = val(c2)? as u32;
-                let triple = (v0 << 18) | (v1 << 12) | (v2 << 6);
-                out.push(((triple >> 16) & 0xFF) as u8);
-                out.push(((triple >> 8) & 0xFF) as u8);
-            }
-            (c2, c3) if c2 != b'=' && c3 != b'=' => {
-                let v2 = val(c2)? as u32;
-                let v3 = val(c3)? as u32;
-                let triple = (v0 << 18) | (v1 << 12) | (v2 << 6) | v3;
-                out.push(((triple >> 16) & 0xFF) as u8);
-                out.push(((triple >> 8) & 0xFF) as u8);
-                out.push((triple & 0xFF) as u8);
-            }
-            _ => return Err("Invalid base64 padding".to_string()),
-        }
-    }
-    Ok(out)
 }
 
 fn decode_percent_spaces(s: &str) -> String {
@@ -918,12 +943,12 @@ fn mime_from_image_ext(path: &Path) -> &'static str {
 }
 
 /// Saves a pasted `data:image/...;base64,...` image into `<vault>/assets/` and returns
-/// `(markdown_src, data_url)` with `markdown_src` relative to `current_rel`.
+/// `markdown_src` relative to `current_rel` alongside the original `data_url`.
 pub fn save_pasted_image(
     root: &Path,
     current_rel: Option<&str>,
     data_url: &str,
-) -> Result<(String, String), String> {
+) -> Result<SavedPastedImage, String> {
     let rest = data_url
         .strip_prefix("data:image/")
         .ok_or_else(|| "Expected data:image/... URL".to_string())?;
@@ -940,7 +965,7 @@ pub fn save_pasted_image(
     }
 
     let ext = image_ext_from_mime(subtype)?;
-    let bytes = base64_decode(payload)?;
+    let bytes = crate::base64::decode(payload)?;
     if bytes.is_empty() {
         return Err("Image data is empty".to_string());
     }
@@ -956,23 +981,23 @@ pub fn save_pasted_image(
     let rel_asset = format!("assets/pasted-{epoch_ms}-{seq}.{ext}");
 
     let dest = resolve_vault_path(root, &rel_asset)?;
-    if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create assets folder: {e}"))?;
-    }
-    fs::write(&dest, &bytes).map_err(|e| format!("Failed to write image {rel_asset}: {e}"))?;
+    crate::fs_util::write_atomic(&dest, &bytes)
+        .map_err(|e| format!("Failed to write image {rel_asset}: {e}"))?;
 
     let depth = current_rel
         .and_then(|r| normalize_rel_path(r).ok())
         .map(|r| r.matches('/').count())
         .unwrap_or(0);
-    let md_src = if depth == 0 {
+    let markdown_src = if depth == 0 {
         rel_asset
     } else {
         format!("{}{}", "../".repeat(depth), rel_asset)
     };
 
-    Ok((md_src, data_url.to_string()))
+    Ok(SavedPastedImage {
+        markdown_src,
+        data_url: data_url.to_string(),
+    })
 }
 
 /// Reads an image inside the vault and returns a `data:<mime>;base64,...` URL.
@@ -988,7 +1013,10 @@ pub fn read_image_data_url(
     }
     let bytes = fs::read(&path).map_err(|e| format!("Failed to read image: {e}"))?;
     let mime = mime_from_image_ext(&path);
-    Ok(format!("data:{mime};base64,{}", base64_encode(&bytes)))
+    Ok(format!(
+        "data:{mime};base64,{}",
+        crate::base64::encode(&bytes)
+    ))
 }
 
 fn is_stopword(term: &str) -> bool {
@@ -1168,7 +1196,10 @@ pub fn resolve_block_reference(
     }
 
     let (page_part, anchor_opt) = match trimmed.split_once('#') {
-        Some((p, a)) => (p.trim(), Some(a.trim().to_string()).filter(|s| !s.is_empty())),
+        Some((p, a)) => (
+            p.trim(),
+            Some(a.trim().to_string()).filter(|s| !s.is_empty()),
+        ),
         None => (trimmed, None),
     };
 
@@ -1191,13 +1222,14 @@ pub fn resolve_block_reference(
         .unwrap_or_else(|| target_rel.clone());
 
     let content = if let Some(ref anchor) = anchor_opt {
-        let blocks = parse_markdown(&raw_md);
+        let blocks = markdown::parse_markdown(&raw_md);
         if let Some(bid) = anchor.strip_prefix('^') {
-            if let Some(found) = blocks
-                .into_iter()
-                .find(|b| block_ref_id(b).map(|x| x.eq_ignore_ascii_case(bid)).unwrap_or(false))
-            {
-                serialize_markdown(&[found]).trim().to_string()
+            if let Some(found) = blocks.into_iter().find(|b| {
+                block_ref_id(b)
+                    .map(|x| x.eq_ignore_ascii_case(bid))
+                    .unwrap_or(false)
+            }) {
+                markdown::serialize_markdown(&[found]).trim().to_string()
             } else {
                 return Ok(None);
             }
@@ -1222,7 +1254,7 @@ pub fn resolve_block_reference(
             if section_blocks.is_empty() {
                 return Ok(None);
             }
-            truncate_chars(serialize_markdown(&section_blocks).trim(), 4000)
+            truncate_chars(markdown::serialize_markdown(&section_blocks).trim(), 4000)
         }
     } else {
         truncate_chars(raw_md.trim(), 4000)
@@ -1252,7 +1284,10 @@ fn is_external_or_asset_target(target: &str) -> bool {
 
 /// Builds the full note/wikilink graph across all `.md` files in the vault.
 pub fn build_vault_graph(root: &Path) -> Result<VaultGraph, String> {
-    let pages = list_pages(root)?;
+    let canon_root = fs::canonicalize(root)
+        .map_err(|e| format!("Invalid vault root {}: {e}", root.display()))?;
+    let pages = list_pages(&canon_root)?;
+    let index = PageIndex::new(&pages);
     let mut nodes: Vec<GraphNode> = Vec::with_capacity(pages.len());
     let mut index_by_id: HashMap<String, usize> = HashMap::new();
 
@@ -1273,17 +1308,17 @@ pub fn build_vault_graph(root: &Path) -> Result<VaultGraph, String> {
     let mut seen_edges: HashSet<(String, String)> = HashSet::new();
 
     for page in &pages {
-        let Ok(raw_md) = read_note(root, &page.rel_path) else {
+        let Ok(raw_md) = fs::read_to_string(canon_root.join(&page.rel_path)) else {
             continue;
         };
-        let links = extract_links(&raw_md);
+        let links = markdown::extract_links(&raw_md);
         for link in links {
             let base_target = link.target.split('#').next().unwrap_or(&link.target).trim();
             if base_target.is_empty() || is_external_or_asset_target(base_target) {
                 continue;
             }
 
-            let resolved = resolve_link(root, Some(&page.rel_path), base_target)?;
+            let resolved = index.resolve(Some(&page.rel_path), base_target);
             let target_id = if let Some(target_rel) = resolved {
                 target_rel
             } else {
@@ -1331,20 +1366,6 @@ pub fn build_vault_graph(root: &Path) -> Result<VaultGraph, String> {
     }
 
     Ok(VaultGraph { nodes, edges })
-}
-
-trait StrExt {
-    fn if_empty_then<F: FnOnce() -> String>(self, f: F) -> String;
-}
-
-impl StrExt for String {
-    fn if_empty_then<F: FnOnce() -> String>(self, f: F) -> String {
-        if self.is_empty() {
-            f()
-        } else {
-            self
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1439,36 +1460,34 @@ mod tests {
     }
 
     #[test]
-    fn base64_round_trip() {
-        for sample in [b"".as_slice(), b"a", b"ab", b"abc", b"hello skillweaver!"] {
-            let enc = base64_encode(sample);
-            let dec = base64_decode(&enc).unwrap();
-            assert_eq!(dec, sample);
-        }
-        assert!(base64_decode("abc").is_err());
-        assert!(base64_decode("ab*=").is_err());
-    }
-
-    #[test]
     fn save_pasted_image_and_read_data_url_with_assets_tree_omission() {
         let root = temp_vault("images");
         create_note(&root, "hero").unwrap();
         create_note(&root, "notes/sub").unwrap();
 
         let png_bytes = vec![137u8, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3, 4];
-        let input_url = format!("data:image/png;base64,{}", base64_encode(&png_bytes));
+        let input_url = format!(
+            "data:image/png;base64,{}",
+            crate::base64::encode(&png_bytes)
+        );
 
-        let (root_src, _) = save_pasted_image(&root, Some("hero.md"), &input_url).unwrap();
-        assert!(root_src.starts_with("assets/pasted-") && root_src.ends_with(".png"));
+        let saved_root = save_pasted_image(&root, Some("hero.md"), &input_url).unwrap();
+        assert!(
+            saved_root.markdown_src.starts_with("assets/pasted-")
+                && saved_root.markdown_src.ends_with(".png")
+        );
         assert_eq!(
-            read_image_data_url(&root, Some("hero.md"), &root_src).unwrap(),
+            read_image_data_url(&root, Some("hero.md"), &saved_root.markdown_src).unwrap(),
             input_url
         );
 
-        let (sub_src, _) = save_pasted_image(&root, Some("notes/sub.md"), &input_url).unwrap();
-        assert!(sub_src.starts_with("../assets/pasted-") && sub_src.ends_with(".png"));
+        let saved_sub = save_pasted_image(&root, Some("notes/sub.md"), &input_url).unwrap();
+        assert!(
+            saved_sub.markdown_src.starts_with("../assets/pasted-")
+                && saved_sub.markdown_src.ends_with(".png")
+        );
         assert_eq!(
-            read_image_data_url(&root, Some("notes/sub.md"), &sub_src).unwrap(),
+            read_image_data_url(&root, Some("notes/sub.md"), &saved_sub.markdown_src).unwrap(),
             input_url
         );
 
@@ -1488,12 +1507,7 @@ mod tests {
         create_note(&root, "hero").unwrap();
         create_note(&root, "notes/hop-server").unwrap();
 
-        write_note(
-            &root,
-            "hero.md",
-            "# Overview\n\nNothing relevant here.\n",
-        )
-        .unwrap();
+        write_note(&root, "hero.md", "# Overview\n\nNothing relevant here.\n").unwrap();
         write_note(
             &root,
             "notes/hop-server.md",
@@ -1501,22 +1515,35 @@ mod tests {
         )
         .unwrap();
 
-        let hits = search_vault(&root, "How does Hop Server execute workflows?", Some("hero.md"), 4).unwrap();
+        let hits = search_vault(
+            &root,
+            "How does Hop Server execute workflows?",
+            Some("hero.md"),
+            4,
+        )
+        .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].rel_path, "notes/hop-server.md");
-        assert!(hits[0].excerpt.contains("Hop Server executes workflows safely"));
+        assert!(hits[0]
+            .excerpt
+            .contains("Hop Server executes workflows safely"));
 
         let block_ref = resolve_block_reference(&root, Some("hero.md"), "hop-server#^hop123")
             .unwrap()
             .unwrap();
         assert_eq!(block_ref.rel_path, "notes/hop-server.md");
-        assert!(block_ref.content.contains("Hop Server executes workflows safely."));
+        assert!(block_ref
+            .content
+            .contains("Hop Server executes workflows safely."));
 
-        let heading_ref = resolve_block_reference(&root, Some("hero.md"), "notes/hop-server#Architecture")
-            .unwrap()
-            .unwrap();
+        let heading_ref =
+            resolve_block_reference(&root, Some("hero.md"), "notes/hop-server#Architecture")
+                .unwrap()
+                .unwrap();
         assert!(heading_ref.content.contains("# Architecture"));
-        assert!(heading_ref.content.contains("Hop Server executes workflows safely"));
+        assert!(heading_ref
+            .content
+            .contains("Hop Server executes workflows safely"));
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -1532,7 +1559,8 @@ mod tests {
         write_note(&root, "index.md", "See [[01 - Data Test]]\n").unwrap();
 
         // Move root note -> 01 - Data/01 - Data Test.md
-        let moved = rename_entry(&root, "01 - Data Test.md", "01 - Data/01 - Data Test.md").unwrap();
+        let moved =
+            rename_entry(&root, "01 - Data Test.md", "01 - Data/01 - Data Test.md").unwrap();
         assert_eq!(moved, "01 - Data/01 - Data Test.md");
         assert!(read_note(&root, "index.md")
             .unwrap()
@@ -1620,7 +1648,9 @@ mod tests {
         assert_eq!(h1, h2);
         assert_ne!(h1, h3);
         assert_eq!(h1.len(), 16);
-        assert!(h1.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(h1
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
     }
 
     #[test]
@@ -1631,6 +1661,72 @@ mod tests {
 
         assert!(read_note_mtime_ms(&root, "alpha.md").is_some());
         assert!(read_note_mtime_ms(&root, "missing.md").is_none());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn large_vault_backlinks_and_graph_scale_cleanly() {
+        let root = temp_vault("large_scale");
+        fs::write(root.join("hub.md"), "# Hub\n\nCentral note.\n").unwrap();
+
+        for folder_idx in 0..10 {
+            let folder_name = format!("sec-{folder_idx:02}");
+            fs::create_dir_all(root.join(&folder_name)).unwrap();
+        }
+
+        // 249 satellite notes + hub = 250 notes total, ~1,000 wikilinks.
+        for i in 0..249usize {
+            let folder_idx = i % 10;
+            let next_i = (i + 1) % 249;
+            let cross_folder = (i + 7) % 10;
+            let rel = format!("sec-{folder_idx:02}/note-{i:03}.md");
+            let content = format!(
+                "# Note {i}\n\nLinks: [[hub]], [[note-{next_i:03}]], [[sec-{cross_folder:02}/note-{next_i:03}]], [[Shared Ghost]].\n"
+            );
+            fs::write(root.join(&rel), content).unwrap();
+        }
+
+        let graph = build_vault_graph(&root).unwrap();
+        assert_eq!(graph.nodes.len(), 251);
+        assert!(graph
+            .nodes
+            .iter()
+            .any(|n| !n.exists && n.label == "Shared Ghost"));
+
+        let backlinks = find_backlinks(&root, "hub.md").unwrap();
+        assert_eq!(backlinks.len(), 249);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn folder_rename_rewrites_multiple_links_in_single_pass_with_hashes() {
+        let root = temp_vault("dir_rename_batch");
+        create_note(&root, "hub").unwrap();
+        create_note(&root, "lore/alpha").unwrap();
+        create_note(&root, "lore/beta").unwrap();
+
+        write_note(
+            &root,
+            "hub.md",
+            "See [[lore/alpha]], [[alpha|A]], and [[lore/beta]].\n",
+        )
+        .unwrap();
+
+        let outcome = rename_entry_tracked(&root, "lore", "world").unwrap();
+        assert_eq!(outcome.new_rel_path, "world");
+        assert_eq!(outcome.rewritten_notes.len(), 1);
+        assert_eq!(outcome.rewritten_notes[0].rel_path, "hub.md");
+
+        let hub_after = read_note(&root, "hub.md").unwrap();
+        assert!(hub_after.contains("[[world/alpha]]"));
+        assert!(hub_after.contains("[[world/alpha|A]]"));
+        assert!(hub_after.contains("[[world/beta]]"));
+        assert_eq!(
+            outcome.rewritten_notes[0].content_hash,
+            content_hash(&hub_after)
+        );
 
         let _ = fs::remove_dir_all(&root);
     }
