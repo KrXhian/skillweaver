@@ -780,9 +780,7 @@ pub fn get_cached_models() -> ModelsCache {
 
 #[tauri::command]
 pub async fn ai_list_models(request: AiListModelsRequest) -> Result<CachedModelList, String> {
-    tauri::async_runtime::spawn_blocking(move || ai::list_models(&request))
-        .await
-        .map_err(|e| format!("Model list task failed: {e}"))?
+    ai::list_models(&request).await
 }
 
 #[tauri::command(async)]

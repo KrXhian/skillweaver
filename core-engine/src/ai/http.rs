@@ -12,58 +12,38 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Shared HTTP (`curl`) configuration escaping and error extraction helpers.
+//! Shared native HTTP client helpers and provider error extraction.
 
+use reqwest::header::{HeaderName, HeaderValue};
+use reqwest::{Client, RequestBuilder};
 use serde_json::Value;
-use std::fmt::Write as _;
+use std::time::Duration;
 
-/// Marker appended via `curl -w` so response body and HTTP status stay separable.
-pub(crate) const HTTP_STATUS_MARKER: &str = "__SW_HTTP_STATUS__:";
-
-/// Returns the platform `curl` binary name.
-pub(crate) fn curl_binary() -> &'static str {
-    if cfg!(windows) {
-        "curl.exe"
-    } else {
-        "curl"
-    }
+/// Builds a configured `reqwest::Client` using OS-native TLS and system proxy settings.
+pub(crate) fn build_http_client(
+    connect_timeout: Duration,
+    total_timeout: Duration,
+) -> Result<Client, String> {
+    Client::builder()
+        .connect_timeout(connect_timeout)
+        .timeout(total_timeout)
+        .build()
+        .map_err(|e| format!("Failed to initialize HTTP client: {e}"))
 }
 
-/// Returns the `-w` format argument appended to `curl` requests to emit HTTP status.
-pub(crate) fn status_write_out_arg() -> String {
-    format!("\n{HTTP_STATUS_MARKER}%{{http_code}}\n")
-}
-
-/// Escapes a value for use inside a `curl --config` double-quoted string.
-pub(crate) fn escape_curl_config_value(value: &str) -> String {
-    let mut out = String::with_capacity(value.len() + 2);
-    out.push('"');
-    for ch in value.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\r' | '\n' => out.push(' '),
-            c if c.is_control() => {}
-            _ => out.push(ch),
-        }
-    }
-    out.push('"');
-    out
-}
-
-/// Builds the `--config -` stdin payload containing URL and request headers.
-pub(crate) fn build_curl_config_stdin(url: &str, headers: &[(String, String)]) -> String {
-    let mut config_stdin = String::with_capacity(64 + headers.len() * 48);
-    let _ = writeln!(config_stdin, "url = {}", escape_curl_config_value(url));
+/// Validates and attaches HTTP headers to a `RequestBuilder`, rejecting invalid or injected lines.
+pub(crate) fn apply_headers(
+    mut builder: RequestBuilder,
+    headers: &[(String, String)],
+) -> Result<RequestBuilder, String> {
     for (name, value) in headers {
-        let header_line = format!("{name}: {value}");
-        let _ = writeln!(
-            config_stdin,
-            "header = {}",
-            escape_curl_config_value(&header_line)
-        );
+        let header_name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|e| format!("Invalid HTTP header name '{name}': {e}"))?;
+        let header_value = HeaderValue::from_str(value)
+            .map_err(|e| format!("Invalid HTTP header value for '{name}': {e}"))?;
+        builder = builder.header(header_name, header_value);
     }
-    config_stdin
+    Ok(builder)
 }
 
 /// Extracts a readable error message from a provider JSON error body.
@@ -94,12 +74,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn curl_config_escapes_quotes_backslashes_and_newlines() {
-        let cfg = build_curl_config_stdin(
-            "https://example.com/v1\n/chat",
-            &[("Authorization".to_string(), "Bearer a\"b\\c".to_string())],
+    fn apply_headers_accepts_provider_headers_and_rejects_crlf_injection() {
+        let client = build_http_client(Duration::from_secs(5), Duration::from_secs(10)).unwrap();
+        let valid_headers = vec![
+            (
+                "Authorization".to_string(),
+                "Bearer sk-test-123".to_string(),
+            ),
+            ("x-api-key".to_string(), "sk-ant-1".to_string()),
+            ("x-goog-api-key".to_string(), "AIzaTest".to_string()),
+        ];
+        let req = apply_headers(client.get("https://example.com/v1/models"), &valid_headers)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            req.headers().get("authorization").unwrap(),
+            "Bearer sk-test-123"
         );
-        assert!(cfg.contains("url = \"https://example.com/v1 /chat\"\n"));
-        assert!(cfg.contains("header = \"Authorization: Bearer a\\\"b\\\\c\"\n"));
+        assert_eq!(req.headers().get("x-api-key").unwrap(), "sk-ant-1");
+        assert_eq!(req.headers().get("x-goog-api-key").unwrap(), "AIzaTest");
+
+        let injected_headers = vec![(
+            "Authorization".to_string(),
+            "Bearer abc\r\nX-Injected: evil".to_string(),
+        )];
+        assert!(apply_headers(
+            client.get("https://example.com/v1/models"),
+            &injected_headers
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn extract_http_error_message_reads_nested_and_top_level_json() {
+        let nested = r#"{"error":{"message":"Quota exceeded"}}"#;
+        assert_eq!(extract_http_error_message(nested), "Quota exceeded");
+
+        let top = r#"{"message":"Unauthorized"}"#;
+        assert_eq!(extract_http_error_message(top), "Unauthorized");
+
+        assert_eq!(
+            extract_http_error_message("   "),
+            "Request failed with no response body"
+        );
     }
 }
