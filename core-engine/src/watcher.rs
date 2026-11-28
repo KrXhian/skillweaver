@@ -66,7 +66,7 @@ struct WatcherInner {
 /// Managed Tauri state owning the recursive vault filesystem watcher and self-write suppression map.
 #[derive(Default)]
 pub struct VaultWatcherState {
-    inner: Mutex<WatcherInner>,
+    inner: Arc<Mutex<WatcherInner>>,
 }
 
 fn norm_lower_key(rel: &str) -> String {
@@ -408,54 +408,100 @@ impl VaultWatcherState {
                 root.display()
             )
         })?;
+        let known_md = collect_known_pages(&canon_root);
+        let known_dirs = collect_known_dirs(&canon_root);
+        self.watch_folder_seeded_async(app, &canon_root, known_md, known_dirs)
+    }
 
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|_| "Vault watcher lock poisoned".to_string())?;
+    /// Starts recursive watching immediately with pre-collected vault maps, initializing OS `notify` in the background.
+    pub fn watch_folder_seeded_async(
+        &self,
+        app: &AppHandle,
+        root: &Path,
+        seeded_pages: HashMap<String, String>,
+        seeded_dirs: HashSet<String>,
+    ) -> Result<(), String> {
+        let canon_root = fs::canonicalize(root).map_err(|e| {
+            format!(
+                "Failed to canonicalize watched folder {}: {e}",
+                root.display()
+            )
+        })?;
 
-        if guard.active_root.as_ref() == Some(&canon_root) && guard._debouncer.is_some() {
-            return Ok(());
-        }
+        let (app_handle, watch_root, suppressed, known_md, known_dirs) = {
+            let mut guard = self
+                .inner
+                .lock()
+                .map_err(|_| "Vault watcher lock poisoned".to_string())?;
 
-        // Drop any previous debouncer before initializing the new watcher.
-        guard._debouncer = None;
-        guard.active_root = Some(canon_root.clone());
+            if guard.active_root.as_ref() == Some(&canon_root) && guard._debouncer.is_some() {
+                return Ok(());
+            }
 
-        if let Ok(mut s) = guard.suppressed.lock() {
-            s.clear();
-        }
-        if let Ok(mut m) = guard.known_md_files.lock() {
-            *m = collect_known_pages(&canon_root);
-        }
-        if let Ok(mut d) = guard.known_dirs.lock() {
-            *d = collect_known_dirs(&canon_root);
-        }
+            // Drop any previous debouncer before initializing the new watcher.
+            guard._debouncer = None;
+            guard.active_root = Some(canon_root.clone());
 
-        let app_handle = app.clone();
-        let watch_root = canon_root.clone();
-        let suppressed = Arc::clone(&guard.suppressed);
-        let known_md = Arc::clone(&guard.known_md_files);
-        let known_dirs = Arc::clone(&guard.known_dirs);
+            if let Ok(mut s) = guard.suppressed.lock() {
+                s.clear();
+            }
+            if let Ok(mut m) = guard.known_md_files.lock() {
+                *m = seeded_pages;
+            }
+            if let Ok(mut d) = guard.known_dirs.lock() {
+                *d = seeded_dirs;
+            }
 
-        let mut debouncer = new_debouncer(DEBOUNCE_WINDOW, move |res: DebounceEventResult| {
-            let Ok(events) = res else {
+            (
+                app.clone(),
+                canon_root.clone(),
+                Arc::clone(&guard.suppressed),
+                Arc::clone(&guard.known_md_files),
+                Arc::clone(&guard.known_dirs),
+            )
+        };
+
+        let state_inner = Arc::clone(&self.inner);
+        std::thread::spawn(move || {
+            let root_for_cb = watch_root.clone();
+            let suppressed_cb = Arc::clone(&suppressed);
+            let known_md_cb = Arc::clone(&known_md);
+            let known_dirs_cb = Arc::clone(&known_dirs);
+
+            let Ok(mut debouncer) =
+                new_debouncer(DEBOUNCE_WINDOW, move |res: DebounceEventResult| {
+                    let Ok(events) = res else {
+                        return;
+                    };
+                    if let Some(payload) = process_debounced_events(
+                        &root_for_cb,
+                        events,
+                        &suppressed_cb,
+                        &known_md_cb,
+                        &known_dirs_cb,
+                    ) {
+                        let _ = app_handle.emit("vault:fs-changed", payload);
+                    }
+                })
+            else {
                 return;
             };
-            if let Some(payload) =
-                process_debounced_events(&watch_root, events, &suppressed, &known_md, &known_dirs)
+
+            if debouncer
+                .watcher()
+                .watch(&watch_root, RecursiveMode::Recursive)
+                .is_err()
             {
-                let _ = app_handle.emit("vault:fs-changed", payload);
+                return;
             }
-        })
-        .map_err(|e| format!("Failed to initialize vault watcher: {e}"))?;
 
-        debouncer
-            .watcher()
-            .watch(&canon_root, RecursiveMode::Recursive)
-            .map_err(|e| format!("Failed to watch folder {}: {e}", canon_root.display()))?;
+            if let Ok(mut guard) = state_inner.lock() {
+                if guard.active_root.as_ref() == Some(&watch_root) {
+                    guard._debouncer = Some(debouncer);
+                }
+            }
+        });
 
-        guard._debouncer = Some(debouncer);
         Ok(())
     }
 

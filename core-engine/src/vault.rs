@@ -75,9 +75,23 @@ pub struct GraphNode {
     pub id: String,
     pub rel_path: Option<String>,
     pub label: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_slug: Option<String>,
     pub folder: String,
     pub exists: bool,
     pub degree: usize,
+    #[serde(default)]
+    pub in_degree: usize,
+    #[serde(default)]
+    pub out_degree: usize,
+    #[serde(default)]
+    pub est_tokens: usize,
+}
+
+fn default_edge_weight() -> usize {
+    1
 }
 
 /// Directed link edge in the vault knowledge graph.
@@ -85,6 +99,8 @@ pub struct GraphNode {
 pub struct GraphEdge {
     pub source: String,
     pub target: String,
+    #[serde(default = "default_edge_weight")]
+    pub weight: usize,
 }
 
 /// Complete link graph for all `.md` files and unresolved wikilinks in a vault.
@@ -123,6 +139,8 @@ pub struct VaultSnapshot {
     pub tree: Vec<FileTreeNode>,
     pub pages: Vec<PageEntry>,
     pub initial_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_branch: Option<String>,
 }
 
 fn is_ignored_name(name: &str) -> bool {
@@ -423,25 +441,205 @@ pub fn display_path_string(path: &Path) -> String {
     }
 }
 
-/// Builds a complete `VaultSnapshot` for an opened folder.
-pub fn snapshot_vault(root: &Path, remembered_file: Option<&str>) -> Result<VaultSnapshot, String> {
+fn parse_git_head_branch(raw_head: &str) -> Option<String> {
+    let line = raw_head.lines().next()?.trim();
+    if let Some(ref_target) = line.strip_prefix("ref:") {
+        let ref_path = ref_target.trim();
+        if let Some(branch) = ref_path.strip_prefix("refs/heads/") {
+            let trimmed = branch.trim();
+            return (!trimmed.is_empty()).then(|| trimmed.to_string());
+        }
+        if let Some(other) = ref_path.strip_prefix("refs/") {
+            let trimmed = other.trim();
+            return (!trimmed.is_empty()).then(|| trimmed.to_string());
+        }
+        return (!ref_path.is_empty()).then(|| ref_path.to_string());
+    }
+    if line.len() >= 7 && line.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Some(line[..7].to_string());
+    }
+    None
+}
+
+/// Reads the active Git branch (or short detached SHA) without spawning `git.exe`.
+pub fn read_git_branch(root: &Path) -> Option<String> {
+    let mut cursor = Some(root);
+    for _ in 0..6 {
+        let dir = cursor?;
+        let dot_git = dir.join(".git");
+        if dot_git.is_dir() {
+            let head = fs::read_to_string(dot_git.join("HEAD")).ok()?;
+            return parse_git_head_branch(&head);
+        }
+        if dot_git.is_file() {
+            let dot_git_raw = fs::read_to_string(&dot_git).ok()?;
+            let gitdir_spec = dot_git_raw
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("gitdir:"))?
+                .trim();
+            if gitdir_spec.is_empty() {
+                return None;
+            }
+            let gitdir_path = Path::new(gitdir_spec);
+            let resolved = if gitdir_path.is_absolute() {
+                gitdir_path.to_path_buf()
+            } else {
+                dir.join(gitdir_path)
+            };
+            let head = fs::read_to_string(resolved.join("HEAD")).ok()?;
+            return parse_git_head_branch(&head);
+        }
+        cursor = dir.parent();
+    }
+    None
+}
+
+fn scan_vault_dir(
+    dir: &Path,
+    rel_prefix: &str,
+    pages: &mut Vec<PageEntry>,
+    known_pages: &mut HashMap<String, String>,
+    known_dirs: &mut HashSet<String>,
+) -> Result<Vec<FileTreeNode>, String> {
+    let entries = fs::read_dir(dir)
+        .map_err(|e| format!("Failed to read directory {}: {e}", dir.display()))?;
+
+    let mut nodes = Vec::new();
+    for entry_res in entries {
+        let Ok(entry) = entry_res else {
+            continue;
+        };
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if is_ignored_name(&name) {
+            continue;
+        }
+        let rel_path = if rel_prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{rel_prefix}/{name}")
+        };
+        let path = entry.path();
+
+        if file_type.is_dir() {
+            if !name.eq_ignore_ascii_case("assets")
+                && !rel_path
+                    .split('/')
+                    .any(|s| s.eq_ignore_ascii_case("assets"))
+            {
+                known_dirs.insert(rel_path.to_ascii_lowercase());
+            }
+            let children = scan_vault_dir(&path, &rel_path, pages, known_pages, known_dirs)?;
+            if rel_prefix.is_empty() && name.eq_ignore_ascii_case("assets") && children.is_empty() {
+                continue;
+            }
+            nodes.push(FileTreeNode {
+                name,
+                rel_path,
+                is_dir: true,
+                children,
+            });
+        } else if file_type.is_file() && is_markdown_file(&path) {
+            let link_target = strip_md_ext(&rel_path);
+            let title = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| link_target.clone());
+            let folder = rel_prefix.to_string();
+
+            if !rel_path
+                .split('/')
+                .any(|s| s.eq_ignore_ascii_case("assets"))
+            {
+                known_pages.insert(rel_path.to_ascii_lowercase(), rel_path.clone());
+            }
+
+            pages.push(PageEntry {
+                rel_path: rel_path.clone(),
+                title,
+                link_target,
+                folder,
+            });
+            nodes.push(FileTreeNode {
+                name,
+                rel_path,
+                is_dir: false,
+                children: Vec::new(),
+            });
+        }
+    }
+
+    nodes.sort_by(|a, b| {
+        (!a.is_dir).cmp(&!b.is_dir).then_with(|| {
+            a.name
+                .to_ascii_lowercase()
+                .cmp(&b.name.to_ascii_lowercase())
+        })
+    });
+
+    Ok(nodes)
+}
+
+/// Result of a single-pass vault traversal pairing the UI snapshot with watcher index maps.
+pub struct VaultScan {
+    pub snapshot: VaultSnapshot,
+    pub known_pages: HashMap<String, String>,
+    pub known_dirs: HashSet<String>,
+}
+
+/// Scans an opened vault in a single traversal, returning snapshot and watcher index maps.
+pub fn snapshot_vault_with_known(
+    root: &Path,
+    remembered_file: Option<&str>,
+) -> Result<VaultScan, String> {
     let canon_root = fs::canonicalize(root)
         .map_err(|e| format!("Failed to open folder {}: {e}", root.display()))?;
-    let tree = build_tree(&canon_root)?;
-    let pages = list_pages(&canon_root)?;
+    let mut pages = Vec::new();
+    let mut known_pages = HashMap::new();
+    let mut known_dirs = HashSet::new();
+    let tree = scan_vault_dir(
+        &canon_root,
+        "",
+        &mut pages,
+        &mut known_pages,
+        &mut known_dirs,
+    )?;
+
+    pages.sort_by(|a, b| {
+        a.rel_path
+            .to_ascii_lowercase()
+            .cmp(&b.rel_path.to_ascii_lowercase())
+    });
+
     let initial_file = pick_initial_file(&canon_root, &pages, remembered_file);
     let root_name = canon_root
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| display_path_string(&canon_root));
+    let git_branch = read_git_branch(&canon_root);
 
-    Ok(VaultSnapshot {
-        root_path: display_path_string(&canon_root),
-        root_name,
-        tree,
-        pages,
-        initial_file,
+    Ok(VaultScan {
+        snapshot: VaultSnapshot {
+            root_path: display_path_string(&canon_root),
+            root_name,
+            tree,
+            pages,
+            initial_file,
+            git_branch,
+        },
+        known_pages,
+        known_dirs,
     })
+}
+
+/// Builds a complete `VaultSnapshot` for an opened folder.
+pub fn snapshot_vault(root: &Path, remembered_file: Option<&str>) -> Result<VaultSnapshot, String> {
+    Ok(snapshot_vault_with_known(root, remembered_file)?.snapshot)
 }
 
 pub fn read_note(root: &Path, rel_path: &str) -> crate::error::Result<String> {
@@ -1283,6 +1481,83 @@ fn is_external_or_asset_target(target: &str) -> bool {
 }
 
 /// Builds the full note/wikilink graph across all `.md` files in the vault.
+fn is_cjk_or_fullwidth(ch: char) -> bool {
+    let u = ch as u32;
+    (0x3000..=0x9fff).contains(&u)
+        || (0xac00..=0xd7af).contains(&u)
+        || (0xff00..=0xffef).contains(&u)
+}
+
+fn estimate_tokens_fast(text: &str) -> usize {
+    let mut halves = 0usize;
+    let mut has_content = false;
+    let mut chars = text.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\r' || ch == '\u{200B}' || ch.is_whitespace() {
+            continue;
+        }
+        has_content = true;
+        if is_cjk_or_fullwidth(ch) {
+            halves += 3;
+        } else if ch.is_ascii_alphanumeric() {
+            let mut len = 1usize;
+            while let Some(&next) = chars.peek() {
+                if next.is_ascii_alphanumeric() {
+                    chars.next();
+                    len += 1;
+                } else {
+                    break;
+                }
+            }
+            let tok = if len <= 7 { 1 } else { (len * 2).div_ceil(9) };
+            halves += tok * 2;
+        } else {
+            let mut len = 1usize;
+            while let Some(&next) = chars.peek() {
+                if next == '\r'
+                    || next == '\u{200B}'
+                    || next.is_whitespace()
+                    || next.is_ascii_alphanumeric()
+                    || is_cjk_or_fullwidth(next)
+                {
+                    break;
+                }
+                chars.next();
+                len += 1;
+            }
+            if len == 1 {
+                halves += 1;
+            } else {
+                halves += len.div_ceil(2) * 2;
+            }
+        }
+    }
+
+    if !has_content {
+        0
+    } else {
+        halves.div_ceil(2).max(1)
+    }
+}
+
+fn detect_vault_skill_slug(rel_path: &str, raw_md: &str) -> Option<String> {
+    let mut parts = rel_path.split('/');
+    let first = parts.next()?;
+    let slug = parts.next()?;
+    let file = parts.next()?;
+    if parts.next().is_some()
+        || !first.eq_ignore_ascii_case("skills")
+        || !file.eq_ignore_ascii_case("SKILL.md")
+        || slug.is_empty()
+    {
+        return None;
+    }
+    let parsed = crate::ai::parse_skill_markdown(raw_md, slug);
+    parsed.has_frontmatter.then(|| slug.to_string())
+}
+
+/// Scans all `.md` files and wikilinks to produce nodes (notes, `@skills`, and ghosts) and directed edges.
 pub fn build_vault_graph(root: &Path) -> Result<VaultGraph, String> {
     let canon_root = fs::canonicalize(root)
         .map_err(|e| format!("Invalid vault root {}: {e}", root.display()))?;
@@ -1298,19 +1573,34 @@ pub fn build_vault_graph(root: &Path) -> Result<VaultGraph, String> {
             id: page.rel_path.clone(),
             rel_path: Some(page.rel_path.clone()),
             label: page.title.clone(),
+            kind: "note".to_string(),
+            skill_slug: None,
             folder: page.folder.clone(),
             exists: true,
             degree: 0,
+            in_degree: 0,
+            out_degree: 0,
+            est_tokens: 0,
         });
     }
 
     let mut edges: Vec<GraphEdge> = Vec::new();
-    let mut seen_edges: HashSet<(String, String)> = HashSet::new();
+    let mut edge_index: HashMap<(String, String), usize> = HashMap::new();
 
     for page in &pages {
         let Ok(raw_md) = fs::read_to_string(canon_root.join(&page.rel_path)) else {
             continue;
         };
+        if let Some(&src_idx) = index_by_id.get(&page.rel_path) {
+            nodes[src_idx].est_tokens = estimate_tokens_fast(&raw_md);
+            if let Some(slug) = detect_vault_skill_slug(&page.rel_path, &raw_md) {
+                nodes[src_idx].kind = "skill".to_string();
+                nodes[src_idx].label = format!("@{slug}");
+                nodes[src_idx].skill_slug = Some(slug);
+                nodes[src_idx].folder = "skills".to_string();
+            }
+        }
+
         let links = markdown::extract_links(&raw_md);
         for link in links {
             let base_target = link.target.split('#').next().unwrap_or(&link.target).trim();
@@ -1338,9 +1628,14 @@ pub fn build_vault_graph(root: &Path) -> Result<VaultGraph, String> {
                         id: ghost_id.clone(),
                         rel_path: None,
                         label: clean_label.to_string(),
+                        kind: "ghost".to_string(),
+                        skill_slug: None,
                         folder: String::new(),
                         exists: false,
                         degree: 0,
+                        in_degree: 0,
+                        out_degree: 0,
+                        est_tokens: 0,
                     });
                 }
                 ghost_id
@@ -1350,16 +1645,23 @@ pub fn build_vault_graph(root: &Path) -> Result<VaultGraph, String> {
                 continue;
             }
             let edge_key = (page.rel_path.clone(), target_id.clone());
-            if seen_edges.insert(edge_key) {
+            if let Some(&idx) = edge_index.get(&edge_key) {
+                edges[idx].weight += 1;
+            } else {
+                let next_idx = edges.len();
+                edge_index.insert(edge_key, next_idx);
                 if let Some(&src_idx) = index_by_id.get(&page.rel_path) {
+                    nodes[src_idx].out_degree += 1;
                     nodes[src_idx].degree += 1;
                 }
                 if let Some(&dst_idx) = index_by_id.get(&target_id) {
+                    nodes[dst_idx].in_degree += 1;
                     nodes[dst_idx].degree += 1;
                 }
                 edges.push(GraphEdge {
                     source: page.rel_path.clone(),
                     target: target_id,
+                    weight: 1,
                 });
             }
         }
@@ -1581,6 +1883,27 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_vault_with_known_skips_empty_root_assets_and_tracks_known_maps() {
+        let root = temp_vault("scan_known");
+        fs::create_dir_all(root.join("assets")).unwrap();
+        fs::write(root.join("assets/img.png"), b"png").unwrap();
+        fs::create_dir_all(root.join("notes")).unwrap();
+        fs::write(root.join("notes/Spec.md"), "# Spec\n").unwrap();
+
+        let scan = snapshot_vault_with_known(&root, None).unwrap();
+        assert!(!scan.snapshot.tree.iter().any(|n| n.name == "assets"));
+        assert!(scan.snapshot.tree.iter().any(|n| n.name == "notes"));
+        assert!(!scan.known_dirs.contains("assets"));
+        assert!(scan.known_dirs.contains("notes"));
+        assert_eq!(
+            scan.known_pages.get("notes/spec.md").map(String::as_str),
+            Some("notes/Spec.md")
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn build_vault_graph_links_existing_and_unresolved_notes() {
         let root = temp_vault("graph");
         create_folder(&root, "sub").unwrap();
@@ -1613,6 +1936,96 @@ mod tests {
             .find(|n| !n.exists && n.label == "Missing Note")
             .unwrap();
         assert_eq!(ghost.degree, 1);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn build_vault_graph_classifies_skills_degrees_and_tokens() {
+        let root = temp_vault("graph_rich");
+        create_folder(&root, "skills/docs-reviewer").unwrap();
+        create_note(&root, "hero").unwrap();
+
+        write_note(
+            &root,
+            "hero.md",
+            "# Hero\n\nUses [[skills/docs-reviewer/SKILL]] and [[Future Feature]].\n",
+        )
+        .unwrap();
+        write_note(
+            &root,
+            "skills/docs-reviewer/SKILL.md",
+            "---\nname: Docs Reviewer\ndescription: Audits docs cleanly\n---\n\nCheck [[hero]].\n",
+        )
+        .unwrap();
+
+        let graph = build_vault_graph(&root).unwrap();
+        let hero = graph.nodes.iter().find(|n| n.id == "hero.md").unwrap();
+        assert_eq!(hero.kind, "note");
+        assert_eq!(hero.out_degree, 2);
+        assert_eq!(hero.in_degree, 1);
+        assert_eq!(hero.degree, 3);
+        assert!(hero.est_tokens > 0);
+
+        let skill = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == "skills/docs-reviewer/SKILL.md")
+            .unwrap();
+        assert_eq!(skill.kind, "skill");
+        assert_eq!(skill.label, "@docs-reviewer");
+        assert_eq!(skill.skill_slug.as_deref(), Some("docs-reviewer"));
+        assert_eq!(skill.folder, "skills");
+        assert_eq!(skill.in_degree, 1);
+        assert_eq!(skill.out_degree, 1);
+        assert_eq!(skill.degree, 2);
+        assert!(skill.est_tokens > 0);
+
+        let ghost = graph
+            .nodes
+            .iter()
+            .find(|n| n.kind == "ghost" && n.label == "Future Feature")
+            .unwrap();
+        assert!(!ghost.exists);
+        assert_eq!(ghost.in_degree, 1);
+        assert_eq!(ghost.out_degree, 0);
+        assert_eq!(ghost.est_tokens, 0);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn build_vault_graph_counts_repeated_citation_weights() {
+        let root = temp_vault("graph_weights");
+        create_note(&root, "hub").unwrap();
+        create_note(&root, "detail").unwrap();
+
+        write_note(
+            &root,
+            "hub.md",
+            "# Hub\n\nFirst [[detail]], again [[detail#Section]], and [[detail|Custom Alias]].\n",
+        )
+        .unwrap();
+        write_note(&root, "detail.md", "# Detail\n\nSingle link to [[hub]].\n").unwrap();
+
+        let graph = build_vault_graph(&root).unwrap();
+        let hub = graph.nodes.iter().find(|n| n.id == "hub.md").unwrap();
+        assert_eq!(hub.out_degree, 1);
+        assert_eq!(hub.in_degree, 1);
+
+        let forward = graph
+            .edges
+            .iter()
+            .find(|e| e.source == "hub.md" && e.target == "detail.md")
+            .unwrap();
+        assert_eq!(forward.weight, 3);
+
+        let reverse = graph
+            .edges
+            .iter()
+            .find(|e| e.source == "detail.md" && e.target == "hub.md")
+            .unwrap();
+        assert_eq!(reverse.weight, 1);
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -1729,5 +2142,44 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn read_git_branch_parses_branch_detached_and_worktree_gitdir() {
+        let root = temp_vault("git_branch");
+        assert_eq!(read_git_branch(&root), None);
+
+        // Standard .git directory with branch ref
+        let dot_git = root.join(".git");
+        fs::create_dir_all(&dot_git).unwrap();
+        fs::write(dot_git.join("HEAD"), "ref: refs/heads/feature/skills-v2\n").unwrap();
+        assert_eq!(read_git_branch(&root).as_deref(), Some("feature/skills-v2"));
+
+        // Subdirectory inside repo walks upward
+        let nested = root.join("chapters").join("arc1");
+        fs::create_dir_all(&nested).unwrap();
+        assert_eq!(
+            read_git_branch(&nested).as_deref(),
+            Some("feature/skills-v2")
+        );
+
+        // Detached HEAD commit hash shortens to 7 chars
+        fs::write(
+            dot_git.join("HEAD"),
+            "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678\n",
+        )
+        .unwrap();
+        assert_eq!(read_git_branch(&root).as_deref(), Some("a1b2c3d"));
+
+        // Worktree-style .git file pointing to relative gitdir
+        let wt = temp_vault("git_worktree");
+        let external_git = wt.join("actual-gitdir");
+        fs::create_dir_all(&external_git).unwrap();
+        fs::write(external_git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::write(wt.join(".git"), "gitdir: actual-gitdir\n").unwrap();
+        assert_eq!(read_git_branch(&wt).as_deref(), Some("main"));
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&wt);
     }
 }

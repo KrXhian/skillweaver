@@ -56,6 +56,8 @@ pub struct AiListModelsRequest {
     pub provider: String,
     pub api_key: String,
     pub base_url: String,
+    #[serde(default)]
+    pub profile_id: Option<String>,
 }
 
 impl fmt::Debug for AiListModelsRequest {
@@ -69,6 +71,7 @@ impl fmt::Debug for AiListModelsRequest {
             .field("provider", &self.provider)
             .field("api_key", &masked_key)
             .field("base_url", &self.base_url)
+            .field("profile_id", &self.profile_id)
             .finish()
     }
 }
@@ -82,6 +85,14 @@ pub struct ListModelsHttpRequest {
 
 pub fn models_cache_path() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".skillweaver").join("cache").join("models.json"))
+}
+
+pub fn profile_cache_key(profile_id: Option<&str>, provider: &str, base_url: &str) -> String {
+    if let Some(pid) = profile_id.map(str::trim).filter(|s| !s.is_empty()) {
+        format!("profile::{pid}")
+    } else {
+        canonical_cache_key(provider, base_url)
+    }
 }
 
 pub fn canonical_cache_key(provider: &str, base_url: &str) -> String {
@@ -734,7 +745,7 @@ pub fn list_models(req: &AiListModelsRequest) -> Result<CachedModelList, String>
 
     if let Some(cache_path) = models_cache_path() {
         let mut cache = load_models_cache_from(&cache_path);
-        let key = canonical_cache_key(&req.provider, &req.base_url);
+        let key = profile_cache_key(req.profile_id.as_deref(), &req.provider, &req.base_url);
         cache.insert(key, entry.clone());
         let _ = save_models_cache_to(&cache_path, &cache);
     }
@@ -763,6 +774,7 @@ mod tests {
             provider: "gemini".into(),
             api_key: "AIzaSecret".into(),
             base_url: "".into(),
+            profile_id: None,
         })
         .unwrap();
         assert_eq!(
@@ -778,6 +790,7 @@ mod tests {
             provider: "ollama".into(),
             api_key: "".into(),
             base_url: "http://localhost:11434/v1/chat/completions".into(),
+            profile_id: None,
         })
         .unwrap();
         assert_eq!(ollama_req.url, "http://localhost:11434/api/tags");
@@ -860,5 +873,26 @@ mod tests {
         save_models_cache_to(&path, &cache).unwrap();
         assert_eq!(load_models_cache_from(&path), cache);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn profile_cache_key_isolates_profiles_with_legacy_fallback() {
+        assert_eq!(profile_cache_key(Some("g1"), "gemini", ""), "profile::g1");
+        assert_eq!(
+            profile_cache_key(Some("  g2 "), "gemini", ""),
+            "profile::g2"
+        );
+        assert_ne!(
+            profile_cache_key(Some("g1"), "gemini", ""),
+            profile_cache_key(Some("g2"), "gemini", "")
+        );
+        assert_eq!(
+            profile_cache_key(None, "gemini", ""),
+            canonical_cache_key("gemini", "")
+        );
+        assert_eq!(
+            profile_cache_key(Some("   "), "openai", ""),
+            canonical_cache_key("openai", "")
+        );
     }
 }

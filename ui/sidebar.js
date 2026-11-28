@@ -110,7 +110,16 @@ export class ModalDialog {
 export class SidebarController {
   constructor(
     { treeEl, contextMenuEl, sidebarEl, resizerEl, vaultHeaderEl },
-    { onOpenFile, onNewNote, onNewFolder, onRename, onDelete, onMoveEntry, onResizeEnd }
+    {
+      onOpenFile,
+      onOpenFolder,
+      onNewNote,
+      onNewFolder,
+      onRename,
+      onDelete,
+      onMoveEntry,
+      onResizeEnd,
+    }
   ) {
     this.treeEl = treeEl;
     this.contextMenuEl = contextMenuEl;
@@ -119,6 +128,7 @@ export class SidebarController {
     this.vaultHeaderEl = vaultHeaderEl;
 
     this.onOpenFile = onOpenFile;
+    this.onOpenFolder = onOpenFolder;
     this.onNewNote = onNewNote;
     this.onNewFolder = onNewFolder;
     this.onRename = onRename;
@@ -128,6 +138,7 @@ export class SidebarController {
 
     this.tree = [];
     this.activeFile = null;
+    this.activeFolder = null;
     this.expandedDirs = new Set();
     this.treeDrag = null;
     this.suppressNextClick = false;
@@ -200,9 +211,24 @@ export class SidebarController {
   setActiveFile(relPath) {
     this.activeFile = relPath || null;
     if (this.activeFile) {
+      this.activeFolder = null;
       const parts = this.activeFile.split("/");
       for (let i = 1; i < parts.length; i++) {
         this.expandedDirs.add(parts.slice(0, i).join("/"));
+      }
+    }
+    this.render();
+  }
+
+  setActiveFolder(relDir) {
+    this.activeFolder = relDir === null || relDir === undefined ? null : relDir;
+    if (this.activeFolder !== null) {
+      this.activeFile = null;
+      if (this.activeFolder) {
+        const parts = this.activeFolder.split("/");
+        for (let i = 1; i <= parts.length; i++) {
+          this.expandedDirs.add(parts.slice(0, i).join("/"));
+        }
       }
     }
     this.render();
@@ -216,6 +242,10 @@ export class SidebarController {
   openContextMenu(x, y, node) {
     const items = [];
     if (node.is_dir) {
+      items.push({
+        label: "Open Folder View",
+        action: () => this.onOpenFolder?.(node.rel_path),
+      });
       items.push({ label: "New Note Here", action: () => this.onNewNote(node.rel_path) });
       items.push({ label: "New Subfolder", action: () => this.onNewFolder(node.rel_path) });
       items.push({ divider: true });
@@ -262,7 +292,9 @@ export class SidebarController {
   renderNodes(nodes, depth, container) {
     for (const node of nodes) {
       const row = document.createElement("div");
-      const isActive = !node.is_dir && this.activeFile === node.rel_path;
+      const isActive = node.is_dir
+        ? this.activeFolder === node.rel_path
+        : this.activeFile === node.rel_path;
       const isExpanded = node.is_dir && this.expandedDirs.has(node.rel_path);
 
       row.className = `tree-row${isActive ? " active" : ""}`;
@@ -342,18 +374,23 @@ export class SidebarController {
         };
       });
 
-      row.addEventListener("click", () => {
+      row.addEventListener("click", (e) => {
         if (this.suppressNextClick) {
           this.suppressNextClick = false;
           return;
         }
         if (node.is_dir) {
-          if (this.expandedDirs.has(node.rel_path)) {
-            this.expandedDirs.delete(node.rel_path);
+          if (e.target.closest(".tree-chevron") || !this.onOpenFolder) {
+            if (this.expandedDirs.has(node.rel_path)) {
+              this.expandedDirs.delete(node.rel_path);
+            } else {
+              this.expandedDirs.add(node.rel_path);
+            }
+            this.render();
           } else {
             this.expandedDirs.add(node.rel_path);
+            this.onOpenFolder(node.rel_path);
           }
-          this.render();
         } else {
           this.onOpenFile(node.rel_path);
         }

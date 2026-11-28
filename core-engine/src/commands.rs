@@ -16,27 +16,39 @@ use crate::ai::{
     self, AiChatRequest, AiChatSession, AiChatSummary, AiListModelsRequest, AiPrefs, AiState,
     CachedModelList, ModelsCache, SaveSkillRequest, SkillEntry,
 };
+use crate::folder::{self, FolderOverview, FolderProperty, FolderTemplate};
 use crate::markdown::{self, Block};
 use crate::prefs::{self, UiPrefs};
 use crate::terminal::{TerminalStartPayload, TerminalState};
 use crate::vault::{
-    self, BacklinkEntry, ResolvedBlockRef, VaultGraph, VaultSearchHit, VaultSnapshot,
+    self, BacklinkEntry, ResolvedBlockRef, VaultGraph, VaultScan, VaultSearchHit, VaultSnapshot,
 };
 use crate::watcher::{SelfWriteKind, VaultWatcherState};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::thread::JoinHandle;
 use tauri::{AppHandle, State};
 
-/// Shared application state holding the currently opened vault folder.
+/// Pre-computed startup snapshot & initial note prepared asynchronously while WebView2 initializes.
+pub struct PrewarmedStartup {
+    pub prefs: UiPrefs,
+    pub vault: Option<VaultScan>,
+    pub initial_note: Option<NotePayload>,
+}
+
+/// Shared application state holding the currently opened vault folder and startup pre-warm handle.
+#[derive(Default)]
 pub struct AppState {
     pub vault_root: Mutex<Option<PathBuf>>,
+    pub prewarm_handle: Mutex<Option<JoinHandle<PrewarmedStartup>>>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct StartupPayload {
     pub prefs: UiPrefs,
     pub vault: Option<VaultSnapshot>,
+    pub initial_note: Option<NotePayload>,
 }
 
 #[derive(Debug, Serialize)]
@@ -122,13 +134,12 @@ fn build_note_payload(root: &Path, rel_path: &str, raw_md: String) -> Result<Not
     let disk_hash = vault::content_hash(&raw_md);
     let mtime_ms = vault::read_note_mtime_ms(root, rel_path);
     let blocks = markdown::parse_markdown(&raw_md);
-    let backlinks = vault::find_backlinks(root, rel_path).unwrap_or_default();
     Ok(NotePayload {
         rel_path: rel_path.to_string(),
         title: note_title_from_rel(rel_path),
         raw_md,
         blocks,
-        backlinks,
+        backlinks: Vec::new(),
         disk_hash,
         mtime_ms,
     })
@@ -144,22 +155,77 @@ fn open_folder_internal(
     if !folder.is_dir() {
         return Err(format!("Folder does not exist: {}", folder.display()));
     }
-    let snapshot = vault::snapshot_vault(folder, remembered_file)?;
+    let scan = vault::snapshot_vault_with_known(folder, remembered_file)?;
     {
         let mut guard = state
             .vault_root
             .lock()
             .map_err(|_| "App state lock poisoned".to_string())?;
-        *guard = Some(PathBuf::from(&snapshot.root_path));
+        *guard = Some(PathBuf::from(&scan.snapshot.root_path));
     }
     let mut ui_prefs = prefs::load_prefs();
-    ui_prefs.last_folder = Some(snapshot.root_path.clone());
+    ui_prefs.last_folder = Some(scan.snapshot.root_path.clone());
     if remembered_file.is_none() {
-        ui_prefs.last_file = snapshot.initial_file.clone();
+        ui_prefs.last_file = scan.snapshot.initial_file.clone();
     }
     let _ = prefs::save_prefs(&ui_prefs);
-    let _ = watcher.watch_folder(app, Path::new(&snapshot.root_path));
-    Ok(snapshot)
+    let _ = watcher.watch_folder_seeded_async(
+        app,
+        Path::new(&scan.snapshot.root_path),
+        scan.known_pages,
+        scan.known_dirs,
+    );
+    Ok(scan.snapshot)
+}
+
+/// Pre-loads prefs, vault snapshot, and initial note on a background thread during startup.
+pub fn prepare_startup_data() -> PrewarmedStartup {
+    let mut ui_prefs = prefs::load_prefs();
+    let Some(folder_str) = ui_prefs.last_folder.clone() else {
+        return PrewarmedStartup {
+            prefs: ui_prefs,
+            vault: None,
+            initial_note: None,
+        };
+    };
+
+    let folder = PathBuf::from(&folder_str);
+    if !folder.is_dir() {
+        ui_prefs.last_folder = None;
+        ui_prefs.last_file = None;
+        let _ = prefs::save_prefs(&ui_prefs);
+        return PrewarmedStartup {
+            prefs: ui_prefs,
+            vault: None,
+            initial_note: None,
+        };
+    }
+
+    let Ok(scan) = vault::snapshot_vault_with_known(&folder, ui_prefs.last_file.as_deref()) else {
+        return PrewarmedStartup {
+            prefs: ui_prefs,
+            vault: None,
+            initial_note: None,
+        };
+    };
+
+    if ui_prefs.last_folder.as_deref() != Some(scan.snapshot.root_path.as_str()) {
+        ui_prefs.last_folder = Some(scan.snapshot.root_path.clone());
+        let _ = prefs::save_prefs(&ui_prefs);
+    }
+
+    let initial_note = scan.snapshot.initial_file.as_deref().and_then(|rel| {
+        let root_path = Path::new(&scan.snapshot.root_path);
+        let norm = vault::normalize_rel_path(rel).ok()?;
+        let raw_md = vault::read_note(root_path, &norm).ok()?;
+        build_note_payload(root_path, &norm, raw_md).ok()
+    });
+
+    PrewarmedStartup {
+        prefs: ui_prefs,
+        vault: Some(scan),
+        initial_note,
+    }
 }
 
 #[tauri::command(async)]
@@ -168,35 +234,36 @@ pub fn get_startup_state(
     state: State<'_, AppState>,
     watcher: State<'_, VaultWatcherState>,
 ) -> Result<StartupPayload, String> {
-    let mut ui_prefs = prefs::load_prefs();
-    let vault = if let Some(ref folder_str) = ui_prefs.last_folder {
-        let folder = PathBuf::from(folder_str);
-        if folder.is_dir() {
-            let snap = vault::snapshot_vault(&folder, ui_prefs.last_file.as_deref())?;
-            let mut guard = state
-                .vault_root
-                .lock()
-                .map_err(|_| "App state lock poisoned".to_string())?;
-            *guard = Some(PathBuf::from(&snap.root_path));
-            if ui_prefs.last_folder.as_deref() != Some(snap.root_path.as_str()) {
-                ui_prefs.last_folder = Some(snap.root_path.clone());
-                let _ = prefs::save_prefs(&ui_prefs);
+    let handle_opt = state.prewarm_handle.lock().ok().and_then(|mut g| g.take());
+    let prewarmed = match handle_opt {
+        Some(handle) => handle.join().unwrap_or_else(|_| prepare_startup_data()),
+        None => prepare_startup_data(),
+    };
+
+    let vault_snap = match prewarmed.vault {
+        Some(scan) => {
+            {
+                let mut guard = state
+                    .vault_root
+                    .lock()
+                    .map_err(|_| "App state lock poisoned".to_string())?;
+                *guard = Some(PathBuf::from(&scan.snapshot.root_path));
             }
-            let _ = watcher.watch_folder(&app, Path::new(&snap.root_path));
-            Some(snap)
-        } else {
-            ui_prefs.last_folder = None;
-            ui_prefs.last_file = None;
-            let _ = prefs::save_prefs(&ui_prefs);
-            None
+            let _ = watcher.watch_folder_seeded_async(
+                &app,
+                Path::new(&scan.snapshot.root_path),
+                scan.known_pages,
+                scan.known_dirs,
+            );
+            Some(scan.snapshot)
         }
-    } else {
-        None
+        None => None,
     };
 
     Ok(StartupPayload {
-        prefs: ui_prefs,
-        vault,
+        prefs: prewarmed.prefs,
+        vault: vault_snap,
+        initial_note: prewarmed.initial_note,
     })
 }
 
@@ -254,10 +321,15 @@ pub fn open_note(state: State<'_, AppState>, rel_path: String) -> Result<NotePay
     let norm = vault::normalize_rel_path(&rel_path)?;
     let raw_md = vault::read_note(&root, &norm)?;
 
+    let root_str = vault::display_path_string(&root);
     let mut ui_prefs = prefs::load_prefs();
-    ui_prefs.last_folder = Some(vault::display_path_string(&root));
-    ui_prefs.last_file = Some(norm.clone());
-    let _ = prefs::save_prefs(&ui_prefs);
+    if ui_prefs.last_folder.as_deref() != Some(root_str.as_str())
+        || ui_prefs.last_file.as_deref() != Some(norm.as_str())
+    {
+        ui_prefs.last_folder = Some(root_str);
+        ui_prefs.last_file = Some(norm.clone());
+        let _ = prefs::save_prefs(&ui_prefs);
+    }
 
     build_note_payload(&root, &norm, raw_md)
 }
@@ -674,14 +746,16 @@ pub fn terminal_complete_path(
     term_state.complete_path(&partial)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_ai_prefs() -> AiPrefs {
     ai::load_ai_prefs()
 }
 
-#[tauri::command]
-pub fn save_ai_prefs(prefs: AiPrefs) -> Result<(), String> {
-    ai::save_ai_prefs(&prefs)
+#[tauri::command(async)]
+pub fn save_ai_prefs(mut prefs: AiPrefs) -> Result<AiPrefs, String> {
+    ai::normalize_ai_prefs(&mut prefs);
+    ai::save_ai_prefs(&prefs)?;
+    Ok(prefs)
 }
 
 #[tauri::command]
@@ -699,7 +773,7 @@ pub fn ai_cancel_stream(ai_state: State<'_, AiState>) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_cached_models() -> ModelsCache {
     ai::load_models_cache()
 }
@@ -711,7 +785,7 @@ pub async fn ai_list_models(request: AiListModelsRequest) -> Result<CachedModelL
         .map_err(|e| format!("Model list task failed: {e}"))?
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn ai_list_chats() -> Vec<AiChatSummary> {
     ai::list_chats()
 }
@@ -845,6 +919,100 @@ pub fn resolve_block_reference(
 pub fn get_vault_graph(state: State<'_, AppState>) -> Result<VaultGraph, String> {
     let root = active_root(&state)?;
     vault::build_vault_graph(&root)
+}
+
+#[tauri::command(async)]
+pub fn get_git_branch(state: State<'_, AppState>) -> Option<String> {
+    let root = state.vault_root.lock().ok().and_then(|g| g.clone())?;
+    vault::read_git_branch(&root)
+}
+
+#[tauri::command(async)]
+pub fn get_backlinks(
+    state: State<'_, AppState>,
+    rel_path: String,
+) -> Result<Vec<BacklinkEntry>, String> {
+    let root = active_root(&state)?;
+    let norm = vault::normalize_rel_path(&rel_path)?;
+    vault::find_backlinks(&root, &norm)
+}
+
+#[tauri::command(async)]
+pub fn get_folder_overview(
+    state: State<'_, AppState>,
+    folder_rel: String,
+) -> Result<FolderOverview, String> {
+    let root = active_root(&state)?;
+    folder::get_folder_overview(&root, &folder_rel)
+}
+
+#[tauri::command(async)]
+pub fn save_folder_properties(
+    state: State<'_, AppState>,
+    folder_rel: String,
+    properties: Vec<FolderProperty>,
+) -> Result<Vec<FolderProperty>, String> {
+    let root = active_root(&state)?;
+    let (_, folder_dir, _) = folder::resolve_folder_dir(&root, &folder_rel)?;
+    folder::save_folder_properties(&folder_dir, properties)
+}
+
+#[tauri::command(async)]
+pub fn save_folder_template(
+    state: State<'_, AppState>,
+    folder_rel: String,
+    file_name: Option<String>,
+    name: String,
+    description: String,
+    body: String,
+) -> Result<FolderTemplate, String> {
+    let root = active_root(&state)?;
+    let (norm_rel, folder_dir, _) = folder::resolve_folder_dir(&root, &folder_rel)?;
+    folder::save_folder_template(
+        &folder_dir,
+        &norm_rel,
+        file_name.as_deref(),
+        &name,
+        &description,
+        &body,
+    )
+}
+
+#[tauri::command(async)]
+pub fn delete_folder_template(
+    state: State<'_, AppState>,
+    folder_rel: String,
+    file_name: String,
+) -> Result<(), String> {
+    let root = active_root(&state)?;
+    let (_, folder_dir, _) = folder::resolve_folder_dir(&root, &folder_rel)?;
+    folder::delete_folder_template(&folder_dir, &file_name)
+}
+
+#[tauri::command(async)]
+pub fn create_note_from_template(
+    state: State<'_, AppState>,
+    watcher: State<'_, VaultWatcherState>,
+    folder_rel: String,
+    note_name: String,
+    template_file_name: Option<String>,
+) -> Result<CreateResult, String> {
+    let root = active_root(&state)?;
+    let created = folder::create_note_from_template(
+        &root,
+        &folder_rel,
+        &note_name,
+        template_file_name.as_deref(),
+    )?;
+    let disk_content = vault::read_note(&root, &created).unwrap_or_default();
+    let hash = vault::content_hash(&disk_content);
+    watcher.record_self_write(&created, SelfWriteKind::ContentHash(hash));
+    watcher.sync_known_vault(&root);
+    let snap = vault::snapshot_vault(&root, Some(&created))?;
+    Ok(CreateResult {
+        rel_path: created,
+        vault: snap,
+    })
 }
 
 #[cfg(test)]

@@ -13,7 +13,13 @@
 // limitations under the License.
 
 import { escapeHtml } from "../inline.js";
+import { computeTextMetrics, estimateTokens, formatTokenCompact } from "../metrics.js";
 import { SKILL_ICON_SVG, normalizeSkillSlug } from "./edits.js";
+
+function skillTokenCount(skill) {
+  const combined = [skill?.name, skill?.description, skill?.body].filter(Boolean).join("\n");
+  return estimateTokens(combined);
+}
 
 /**
  * Collapsible Skill Bank drawer inside the AI Assistant panel.
@@ -215,6 +221,9 @@ export class AiSkillsDrawer {
         .map((s) => {
           const isPinned = pinnedSet.has(s.id);
           const scopeLabel = s.scope === "global" ? "Global" : "Vault";
+          const tok = skillTokenCount(s);
+          const tokLabel = formatTokenCompact(tok);
+          const tokTitle = `Estimated prompt budget: ~${tok.toLocaleString()} tokens`;
           const descText = s.description ? escapeHtml(s.description) : "No description";
           const idAttr = escapeHtml(s.id);
           return `
@@ -224,6 +233,7 @@ export class AiSkillsDrawer {
                   ${SKILL_ICON_SVG}
                   <span class="ai-skill-slug">@${escapeHtml(s.slug)}</span>
                   <span class="ai-skill-scope">${scopeLabel}</span>
+                  <span class="ai-skill-tokens${tok >= 1000 ? " is-heavy" : ""}" title="${escapeHtml(tokTitle)}">${escapeHtml(tokLabel)}</span>
                 </div>
                 <div class="ai-skill-desc">${descText}</div>
               </div>
@@ -240,6 +250,11 @@ export class AiSkillsDrawer {
       return `<div class="ai-history-section">${escapeHtml(heading)}</div>${rows}`;
     };
 
+    const totalPinnedTokens = pinnedList.reduce((acc, s) => acc + skillTokenCount(s), 0);
+    const pinnedHeading = pinnedList.length
+      ? `Pinned in Chat · ${formatTokenCompact(totalPinnedTokens)}`
+      : "Pinned in Chat";
+
     let bodyHtml = "";
     if (!skills.length) {
       bodyHtml = `
@@ -253,7 +268,7 @@ export class AiSkillsDrawer {
       bodyHtml = `<div class="popover-section-label">No matching skills</div>`;
     } else {
       bodyHtml = [
-        renderGroup("Pinned in Chat", pinnedList),
+        renderGroup(pinnedHeading, pinnedList),
         renderGroup("Vault Skills (skills/)", vaultList),
         renderGroup("Global Skill Bank", globalList),
       ].join("");
@@ -399,7 +414,10 @@ export class AiSkillsDrawer {
         </label>
 
         <label class="ai-field">
-          <span>Instructions (Markdown · supports <code>[[wikilinks]]</code>)</span>
+          <div class="ai-skill-body-label-row">
+            <span>Instructions (Markdown · supports <code>[[wikilinks]]</code>)</span>
+            <span id="ai-skill-live-tokens" class="ai-skill-live-tokens"></span>
+          </div>
           <textarea id="ai-skill-body" class="ai-skill-textarea" rows="7" placeholder="# Purpose&#10;Write clear instructions, checklists, or tone rules...">${escapeHtml(this.draft.body)}</textarea>
         </label>
 
@@ -423,6 +441,19 @@ export class AiSkillsDrawer {
     const descInput = this.skillsDrawerEl.querySelector("#ai-skill-desc");
     const bodyInput = this.skillsDrawerEl.querySelector("#ai-skill-body");
     const slugPreview = this.skillsDrawerEl.querySelector("#ai-skill-slug-preview");
+    const liveTokensEl = this.skillsDrawerEl.querySelector("#ai-skill-live-tokens");
+
+    const updateLiveTokens = () => {
+      if (!liveTokensEl) return;
+      const bodyText = bodyInput?.value || "";
+      const fullPromptText = [nameInput?.value, descInput?.value, bodyText]
+        .filter((v) => String(v || "").trim().length > 0)
+        .join("\n");
+      const m = computeTextMetrics(bodyText, fullPromptText);
+      liveTokensEl.textContent = `${formatTokenCompact(m.tokens)} · ${m.words.toLocaleString()} words`;
+      liveTokensEl.title = `Estimated skill prompt budget: ~${m.tokens.toLocaleString()} tokens`;
+    };
+    updateLiveTokens();
 
     const updateSlugPreview = () => {
       const next = normalizeSkillSlug(slugInput.value || nameInput.value) || "my-skill";
@@ -436,6 +467,7 @@ export class AiSkillsDrawer {
         slugInput.value = this.draft.slug;
       }
       updateSlugPreview();
+      updateLiveTokens();
     });
 
     slugInput?.addEventListener("input", () => {
@@ -450,10 +482,12 @@ export class AiSkillsDrawer {
 
     descInput?.addEventListener("input", () => {
       this.draft.description = descInput.value;
+      updateLiveTokens();
     });
 
     bodyInput?.addEventListener("input", () => {
       this.draft.body = bodyInput.value;
+      updateLiveTokens();
     });
 
     this.skillsDrawerEl.querySelector("#ai-skill-cancel")?.addEventListener("click", () => {

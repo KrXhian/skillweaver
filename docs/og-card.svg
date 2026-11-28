@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="35%" r="65%">
+      <stop offset="0%" stop-color="#5b8def" stop-opacity="0.22"/>
+      <stop offset="100%" stop-color="#0f1117" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1200" height="630" fill="#0f1117"/>
+  <rect width="1200" height="630" fill="url(#glow)"/>
+  <g stroke-linecap="round" fill="none">
+    <line x1="920" y1="190" x2="1050" y2="270" stroke="#5b8def" stroke-opacity="0.65" stroke-width="2.5"/>
+    <line x1="920" y1="190" x2="840" y2="320" stroke="#34d399" stroke-opacity="0.88" stroke-width="4.2"/>
+    <line x1="840" y1="320" x2="990" y2="410" stroke="#34d399" stroke-opacity="0.78" stroke-width="3.6"/>
+    <line x1="1050" y1="270" x2="990" y2="410" stroke="#64748b" stroke-opacity="0.45" stroke-width="1.8"/>
+    <line x1="840" y1="320" x2="730" y2="230" stroke="#5b8def" stroke-opacity="0.60" stroke-width="2.4"/>
+  </g>
+  <g>
+    <circle cx="920" cy="190" r="14" fill="#34d399"/>
+    <circle cx="1050" cy="270" r="13" fill="#a78bfa"/>
+    <circle cx="840" cy="320" r="22" fill="#5b8def" stroke="#0f1117" stroke-width="4"/>
+    <circle cx="840" cy="320" r="30" fill="none" stroke="#5b8def" stroke-width="3"/>
+    <circle cx="990" cy="410" r="12" fill="#fbbf24"/>
+    <circle cx="730" cy="230" r="11" fill="#38bdf8"/>
+  </g>
+  <rect x="86" y="138" width="210" height="32" rx="16" fill="#171a22" stroke="#2a3040"/>
+  <text x="191" y="159" text-anchor="middle" fill="#9aa4b8" font-family="Segoe UI, sans-serif" font-size="14" font-weight="600">RUST + TAURI V2 · PLAIN .MD</text>
+  <text x="86" y="242" fill="#eceff6" font-family="Segoe UI, sans-serif" font-size="68" font-weight="800" letter-spacing="-1.5">Skillweaver</text>
+  <text x="86" y="302" fill="#9aa4b8" font-family="Segoe UI, sans-serif" font-size="27" font-weight="400">Local-First Markdown Editor, Weighted Graph</text>
+  <text x="86" y="340" fill="#9aa4b8" font-family="Segoe UI, sans-serif" font-size="27" font-weight="400">&amp; Multi-Key BYOK AI Workspace</text>
+  <g transform="translate(86, 404)" font-family="Consolas, monospace" font-size="16" fill="#cfd6e6">
+    <rect x="0" y="0" width="166" height="38" rx="8" fill="#171a22" stroke="#2a3040"/>
+    <text x="83" y="25" text-anchor="middle">Structured Blocks</text>
+    <rect x="182" y="0" width="152" height="38" rx="8" fill="#171a22" stroke="#2a3040"/>
+    <text x="258" y="25" text-anchor="middle">Weighted Graph</text>
+    <rect x="350" y="0" width="152" height="38" rx="8" fill="#171a22" stroke="#2a3040"/>
+    <text x="426" y="25" text-anchor="middle">Multi-Key BYOK</text>
+    <rect x="518" y="0" width="134" height="38" rx="8" fill="#171a22" stroke="#2a3040"/>
+    <text x="585" y="25" text-anchor="middle">--mcp Server</text>
+  </g>
+  <text x="86" y="520" fill="#6f7b92" font-family="Segoe UI, sans-serif" font-size="18">Blue Frog Foundation · github.com/KrXhian/skillweaver</text>
+</svg>

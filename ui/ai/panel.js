@@ -32,13 +32,23 @@ import {
 import { AiHistoryDrawer, deriveChatTitle } from "./history.js";
 import {
   AiMentionPopover,
+  createAiMentionLinkEl,
   createAiSkillChipEl,
   handleComposerChipBackspace,
   insertPlainTextIntoComposer,
   normalizeEmptyComposer,
   serializeComposerToPrompt,
 } from "./mentions.js";
-import { AiModelPicker, PROVIDER_PRESETS, canonicalCacheKey } from "./models.js";
+import {
+  AiModelPicker,
+  PROVIDER_PRESETS,
+  createProfileId,
+  defaultProfileLabel,
+  getActiveProfile,
+  maskApiKey,
+  profileCacheKey,
+  syncActiveProfileFields,
+} from "./models.js";
 import { AiSkillsDrawer } from "./skills.js";
 import { AiTurnRail } from "./turns.js";
 
@@ -70,6 +80,10 @@ export class AiPanel {
       clearBtn,
       closeBtn,
       settingsDrawerEl,
+      profilesListEl,
+      addProfileBtn,
+      profileFormEl,
+      profileNameInput,
       providerSelect,
       apiKeyInput,
       toggleKeyVisBtn,
@@ -77,6 +91,7 @@ export class AiPanel {
       modelInput,
       pickModelBtn,
       fetchModelsBtn,
+      cancelProfileBtn,
       saveSettingsBtn,
       turnRailEl,
       turnPreviewEl,
@@ -100,6 +115,7 @@ export class AiPanel {
       onToast,
       onClearEditorSelection,
       onPromptRenameChat,
+      onBeforeOpen,
     }
   ) {
     this.panelEl = panelEl;
@@ -107,10 +123,15 @@ export class AiPanel {
     this.toggleBtn = toggleBtn;
     this.settingsBtn = settingsBtn;
     this.settingsDrawerEl = settingsDrawerEl;
+    this.profilesListEl = profilesListEl;
+    this.addProfileBtn = addProfileBtn;
+    this.profileFormEl = profileFormEl;
+    this.profileNameInput = profileNameInput;
     this.providerSelect = providerSelect;
     this.apiKeyInput = apiKeyInput;
     this.baseUrlInput = baseUrlInput;
     this.modelInput = modelInput;
+    this.cancelProfileBtn = cancelProfileBtn;
     this.messagesEl = messagesEl;
     this.chipsEl = chipsEl;
     this.inputEl = inputEl;
@@ -128,6 +149,7 @@ export class AiPanel {
     this.onConfirmDeleteSkill = onConfirmDeleteSkill;
     this.onToast = onToast;
     this.onClearEditorSelection = onClearEditorSelection;
+    this.onBeforeOpen = onBeforeOpen;
 
     this.openState = false;
     this.prefs = {
@@ -135,8 +157,12 @@ export class AiPanel {
       api_key: "",
       base_url: PROVIDER_PRESETS.openai.baseUrl,
       model: "",
+      active_profile_id: null,
+      profiles: [],
     };
     this.prefsLoaded = false;
+    this.editingProfileId = null;
+    this.profileFormOpen = false;
 
     this.includeCurrentPage = true;
     this.searchFolder = true;
@@ -178,6 +204,10 @@ export class AiPanel {
         getPrefs: () => this.prefs,
         setPrefs: (next) => {
           this.prefs = next;
+        },
+        getEditingProfileId: () => this.editingProfileId,
+        onProfileChanged: () => {
+          this.renderProfilesList();
         },
         onToast,
       }
@@ -289,21 +319,28 @@ export class AiPanel {
       this.apiKeyInput.type = this.apiKeyInput.type === "password" ? "text" : "password";
     });
 
+    this.addProfileBtn?.addEventListener("click", () => {
+      this.openProfileForm(null);
+    });
+
+    this.cancelProfileBtn?.addEventListener("click", () => {
+      this.profileFormOpen = false;
+      this.editingProfileId = null;
+      this.syncProfileFormVisibility();
+    });
+
     this.providerSelect.addEventListener("change", () => {
       const nextProvider = this.providerSelect.value;
       const preset = PROVIDER_PRESETS[nextProvider];
       if (preset) {
         this.baseUrlInput.value = preset.baseUrl;
-        const best = this.modelPicker.getBestCachedModel(nextProvider, preset.baseUrl);
+        const best = this.modelPicker.getBestCachedModel(
+          nextProvider,
+          preset.baseUrl,
+          this.editingProfileId
+        );
         this.modelInput.value = best ? best.id : "";
-        if (!preset.needsKey || this.apiKeyInput.value.trim()) {
-          const cacheKey = canonicalCacheKey(nextProvider, preset.baseUrl);
-          if (!this.modelPicker.isCacheFresh(cacheKey)) {
-            this.modelPicker.fetchLiveModels(nextProvider, true);
-          }
-        }
       }
-      this.modelPicker.updateHeader(nextProvider);
     });
 
     saveSettingsBtn.addEventListener("click", () => this.saveSettings());
@@ -355,7 +392,6 @@ export class AiPanel {
     this.initResizer();
     this.initStreamListener();
     this.modelPicker.updateHeader();
-    this.ensurePrefsLoaded();
     this.renderChips();
     this.renderMessages();
   }
@@ -577,7 +613,9 @@ export class AiPanel {
         this.invoke("ai_list_skills").catch(() => []),
       ]);
       if (loaded) {
-        this.prefs = { ...this.prefs, ...loaded };
+        this.prefs = syncActiveProfileFields({ ...this.prefs, ...loaded });
+      } else {
+        this.prefs = syncActiveProfileFields(this.prefs);
       }
       this.modelPicker.setCache(cachedModels);
       if (Array.isArray(skills)) {
@@ -598,31 +636,215 @@ export class AiPanel {
         }
       }
       this.prefsLoaded = true;
-      this.syncSettingsInputs();
+      this.modelPicker.updateHeader();
+      this.renderProfilesList();
       this.renderChips();
-      const preset = PROVIDER_PRESETS[this.prefs.provider] || PROVIDER_PRESETS.openai;
-      if (preset.needsKey && !this.prefs.api_key?.trim()) {
+
+      const profiles = Array.isArray(this.prefs.profiles) ? this.prefs.profiles : [];
+      const active = getActiveProfile(this.prefs);
+      const preset = PROVIDER_PRESETS[active.provider] || PROVIDER_PRESETS.openai;
+      if (!profiles.length || (preset.needsKey && !active.api_key?.trim())) {
         this.settingsDrawerEl.hidden = false;
-      } else {
-        const cacheKey = canonicalCacheKey(this.prefs.provider, this.prefs.base_url);
-        if (!this.modelPicker.isCacheFresh(cacheKey)) {
-          this.modelPicker.fetchLiveModels(this.prefs.provider, true);
-        }
+        this.settingsBtn?.classList.add("active");
+        this.openProfileForm(profiles.length ? active : null);
+      } else if (!this.modelPicker.isProfileCacheFresh(active)) {
+        this.modelPicker.fetchLiveModelsForProfile(active, true);
       }
     } catch {
       this.prefsLoaded = true;
     }
   }
 
-  syncSettingsInputs() {
-    this.providerSelect.value = this.prefs.provider || "openai";
-    this.apiKeyInput.value = this.prefs.api_key || "";
-    this.baseUrlInput.value = this.prefs.base_url || "";
-    this.modelInput.value = this.prefs.model || "";
-    this.modelPicker.updateHeader(this.providerSelect.value);
+  syncProfileFormVisibility() {
+    if (!this.profileFormEl) return;
+    this.profileFormEl.hidden = !this.profileFormOpen;
+    if (this.cancelProfileBtn) {
+      const hasProfiles = Array.isArray(this.prefs.profiles) && this.prefs.profiles.length > 0;
+      this.cancelProfileBtn.hidden = !hasProfiles;
+    }
+  }
+
+  syncSettingsInputs(profileOverride = null) {
+    const target = profileOverride || getActiveProfile(this.prefs);
+    const provider = target.provider || "openai";
+    const preset = PROVIDER_PRESETS[provider] || PROVIDER_PRESETS.openai;
+    if (this.profileNameInput) {
+      this.profileNameInput.value = profileOverride ? target.name || "" : "";
+    }
+    this.providerSelect.value = provider;
+    this.apiKeyInput.value = target.api_key || "";
+    this.apiKeyInput.type = "password";
+    this.baseUrlInput.value = target.base_url || preset.baseUrl;
+    this.modelInput.value = target.model || "";
+    this.modelPicker.updateHeader();
+  }
+
+  renderProfilesList() {
+    if (!this.profilesListEl) return;
+    const profiles = Array.isArray(this.prefs.profiles) ? this.prefs.profiles : [];
+    const active = getActiveProfile(this.prefs);
+
+    if (!profiles.length) {
+      this.profilesListEl.innerHTML = `<div class="ai-profiles-empty">No saved API keys yet. Add one below to start chatting.</div>`;
+      return;
+    }
+
+    this.profilesListEl.innerHTML = profiles
+      .map((p) => {
+        const isActive = p.id === active.id;
+        const preset = PROVIDER_PRESETS[p.provider] || PROVIDER_PRESETS.openai;
+        const providerShort = preset.short || preset.label;
+        const masked = maskApiKey(p.api_key);
+        const keyPart = masked || (preset.needsKey ? "No key" : "Local");
+        const modelPart = (p.model || "").trim() || "No model";
+        return `
+          <div class="ai-profile-row${isActive ? " active" : ""}" data-profile-row="${escapeHtml(
+            p.id
+          )}" role="button" tabindex="0" title="Click to switch to ${escapeHtml(p.name)}">
+            <span class="ai-profile-dot" aria-hidden="true"></span>
+            <span class="ai-profile-info">
+              <span class="ai-profile-name">${escapeHtml(p.name)}</span>
+              <span class="ai-profile-meta">${escapeHtml(providerShort)} &middot; ${escapeHtml(
+                keyPart
+              )} &middot; ${escapeHtml(modelPart)}</span>
+            </span>
+            <span class="ai-profile-actions">
+              <button class="ai-profile-act-btn" data-edit-profile="${escapeHtml(
+                p.id
+              )}" type="button" title="Edit key">Edit</button>
+              <button class="ai-profile-act-btn danger" data-del-profile="${escapeHtml(
+                p.id
+              )}" type="button" title="Delete key">&times;</button>
+            </span>
+          </div>
+        `;
+      })
+      .join("");
+
+    this.profilesListEl.querySelectorAll("[data-profile-row]").forEach((row) => {
+      const pid = row.dataset.profileRow;
+      row.addEventListener("click", (e) => {
+        if (e.target.closest(".ai-profile-actions")) return;
+        this.activateProfile(pid);
+      });
+      row.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          this.activateProfile(pid);
+        }
+      });
+    });
+
+    this.profilesListEl.querySelectorAll("[data-edit-profile]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const found = profiles.find((p) => p.id === btn.dataset.editProfile);
+        if (found) this.openProfileForm(found);
+      });
+    });
+
+    this.profilesListEl.querySelectorAll("[data-del-profile]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this.deleteProfile(btn.dataset.delProfile);
+      });
+    });
+  }
+
+  generateDefaultProfileName(provider) {
+    const base = defaultProfileLabel(provider);
+    const profiles = Array.isArray(this.prefs.profiles) ? this.prefs.profiles : [];
+    const existingCount = profiles.filter((p) => p.provider === provider).length;
+    if (existingCount === 0) return base;
+    return `${base} ${existingCount + 1}`;
+  }
+
+  openProfileForm(profile = null) {
+    this.profileFormOpen = true;
+    this.editingProfileId = profile?.id || null;
+    if (profile) {
+      this.syncSettingsInputs(profile);
+    } else {
+      const provider = "openai";
+      if (this.profileNameInput) this.profileNameInput.value = "";
+      this.providerSelect.value = provider;
+      this.apiKeyInput.value = "";
+      this.apiKeyInput.type = "password";
+      this.baseUrlInput.value = PROVIDER_PRESETS[provider].baseUrl;
+      this.modelInput.value = "";
+    }
+    this.syncProfileFormVisibility();
+    this.profileNameInput?.focus();
+  }
+
+  async activateProfile(profileId) {
+    const profiles = Array.isArray(this.prefs.profiles) ? this.prefs.profiles : [];
+    const target = profiles.find((p) => p.id === profileId);
+    if (!target) return;
+
+    const nextPrefs = syncActiveProfileFields({
+      ...this.prefs,
+      active_profile_id: target.id,
+      profiles,
+    });
+    try {
+      const saved = await this.invoke("save_ai_prefs", { prefs: nextPrefs });
+      this.prefs = saved;
+      this.modelPicker.updateHeader();
+      this.renderProfilesList();
+      const preset = PROVIDER_PRESETS[target.provider] || PROVIDER_PRESETS.openai;
+      if (
+        !this.modelPicker.isProfileCacheFresh(target) &&
+        (!preset.needsKey || target.api_key?.trim())
+      ) {
+        this.modelPicker.fetchLiveModelsForProfile(target, true);
+      }
+      this.onToast?.(
+        `Switched to ${target.name}${target.model ? ` · ${target.model}` : ""}`
+      );
+    } catch (err) {
+      this.onToast?.(`Failed to switch API key: ${err}`, true);
+    }
+  }
+
+  async deleteProfile(profileId) {
+    const profiles = Array.isArray(this.prefs.profiles) ? this.prefs.profiles : [];
+    const target = profiles.find((p) => p.id === profileId);
+    if (!target) return;
+
+    const remaining = profiles.filter((p) => p.id !== profileId);
+    let nextActive = this.prefs.active_profile_id;
+    if (nextActive === profileId) {
+      nextActive = remaining[0]?.id || null;
+    }
+
+    const nextPrefs = syncActiveProfileFields({
+      ...this.prefs,
+      active_profile_id: nextActive,
+      profiles: remaining,
+    });
+    try {
+      const saved = await this.invoke("save_ai_prefs", { prefs: nextPrefs });
+      this.prefs = saved;
+      if (this.editingProfileId === profileId) {
+        this.editingProfileId = null;
+        this.profileFormOpen = false;
+      }
+      if (!remaining.length) {
+        this.openProfileForm(null);
+      } else {
+        this.syncProfileFormVisibility();
+      }
+      this.renderProfilesList();
+      this.modelPicker.updateHeader();
+      this.onToast?.(`Removed "${target.name}"`);
+    } catch (err) {
+      this.onToast?.(`Failed to delete API key: ${err}`, true);
+    }
   }
 
   async open() {
+    this.onBeforeOpen?.();
     this.openState = true;
     this.panelEl.hidden = false;
     this.resizerEl.hidden = false;
@@ -659,8 +881,13 @@ export class AiPanel {
     this.settingsDrawerEl.hidden = nextHidden;
     this.settingsBtn?.classList.toggle("active", !nextHidden);
     if (!nextHidden) {
-      this.syncSettingsInputs();
-      this.apiKeyInput.focus();
+      this.renderProfilesList();
+      const hasProfiles = Array.isArray(this.prefs.profiles) && this.prefs.profiles.length > 0;
+      if (!hasProfiles) {
+        this.openProfileForm(null);
+      } else {
+        this.syncProfileFormVisibility();
+      }
     }
   }
 
@@ -669,11 +896,15 @@ export class AiPanel {
     const api_key = this.apiKeyInput.value.trim();
     const base_url =
       this.baseUrlInput.value.trim() || PROVIDER_PRESETS[provider]?.baseUrl || "";
+    const rawName = (this.profileNameInput?.value || "").trim();
     let model = this.modelInput.value.trim();
-    const cacheKey = canonicalCacheKey(provider, base_url);
 
     if (!model && (api_key || provider === "ollama")) {
-      let best = this.modelPicker.getBestCachedModel(provider, base_url);
+      let best = this.modelPicker.getBestCachedModel(
+        provider,
+        base_url,
+        this.editingProfileId
+      );
       if (!best) {
         const fetched = await this.modelPicker.fetchLiveModels(provider, true);
         best = fetched?.models?.find((m) => !m.is_snapshot) || fetched?.models?.[0] || null;
@@ -690,19 +921,56 @@ export class AiPanel {
       return;
     }
 
-    const nextPrefs = { provider, api_key, base_url, model };
+    const existingProfiles = Array.isArray(this.prefs.profiles)
+      ? this.prefs.profiles.map((p) => ({ ...p }))
+      : [];
+    const editIdx = this.editingProfileId
+      ? existingProfiles.findIndex((p) => p.id === this.editingProfileId)
+      : -1;
+    const profileId = editIdx !== -1 ? existingProfiles[editIdx].id : createProfileId();
+    const name = rawName || this.generateDefaultProfileName(provider);
+    const profileObj = {
+      id: profileId,
+      name,
+      provider,
+      api_key,
+      base_url,
+      model,
+    };
+
+    if (editIdx !== -1) {
+      existingProfiles[editIdx] = profileObj;
+    } else {
+      existingProfiles.push(profileObj);
+    }
+
+    const nextPrefs = syncActiveProfileFields({
+      ...this.prefs,
+      active_profile_id: profileId,
+      profiles: existingProfiles,
+    });
+
     try {
-      await this.invoke("save_ai_prefs", { prefs: nextPrefs });
-      this.prefs = nextPrefs;
+      const saved = await this.invoke("save_ai_prefs", { prefs: nextPrefs });
+      this.prefs = saved;
+      this.profileFormOpen = false;
+      this.editingProfileId = null;
+      this.syncProfileFormVisibility();
+      this.renderProfilesList();
       this.modelPicker.updateHeader();
-      this.settingsDrawerEl.hidden = true;
-      this.settingsBtn?.classList.remove("active");
-      this.onToast?.("AI settings saved");
-      if ((api_key || provider === "ollama") && !this.modelPicker.isCacheFresh(cacheKey)) {
-        this.modelPicker.fetchLiveModels(provider, true);
+      this.onToast?.(`Saved "${name}"`);
+
+      const savedProfile =
+        (saved.profiles || []).find((p) => p.id === profileId) || profileObj;
+      const preset = PROVIDER_PRESETS[provider] || PROVIDER_PRESETS.openai;
+      if (
+        (!preset.needsKey || api_key) &&
+        !this.modelPicker.isProfileCacheFresh(savedProfile)
+      ) {
+        this.modelPicker.fetchLiveModelsForProfile(savedProfile, true);
       }
     } catch (err) {
-      this.onToast?.(`Failed to save AI settings: ${err}`, true);
+      this.onToast?.(`Failed to save AI key: ${err}`, true);
     }
   }
 
@@ -1017,11 +1285,16 @@ export class AiPanel {
     const preset = PROVIDER_PRESETS[this.prefs.provider] || PROVIDER_PRESETS.openai;
     if (preset.needsKey && !this.prefs.api_key?.trim()) {
       this.toggleSettings(true);
+      const active = getActiveProfile(this.prefs);
+      this.openProfileForm(active.id ? active : null);
+      this.apiKeyInput.focus();
       this.onToast?.("Enter your API key first", true);
       return;
     }
     if (!this.prefs.model?.trim()) {
       this.toggleSettings(true);
+      const active = getActiveProfile(this.prefs);
+      this.openProfileForm(active.id ? active : null);
       this.modelPicker.openPopover("settings", false);
       this.onToast?.("Pick an AI model first", true);
       return;
@@ -1202,6 +1475,8 @@ export class AiPanel {
 
     if (e.target.closest("[data-open-settings]")) {
       this.toggleSettings(true);
+      const active = getActiveProfile(this.prefs);
+      this.openProfileForm(active.id ? active : null);
       this.modelInput.focus();
       return;
     }
@@ -1210,11 +1485,23 @@ export class AiPanel {
     if (switchBtn) {
       const suggested = switchBtn.dataset.switchModel;
       if (!suggested) return;
-      const nextPrefs = { ...this.prefs, model: suggested };
+      const profiles = Array.isArray(this.prefs.profiles) ? this.prefs.profiles : [];
+      const activeId = this.prefs.active_profile_id || profiles[0]?.id;
+      const nextProfiles = profiles.map((p) =>
+        p.id === activeId ? { ...p, model: suggested } : p
+      );
+      const nextPrefs = nextProfiles.length
+        ? syncActiveProfileFields({
+            ...this.prefs,
+            active_profile_id: activeId,
+            profiles: nextProfiles,
+          })
+        : { ...this.prefs, model: suggested };
       try {
-        await this.invoke("save_ai_prefs", { prefs: nextPrefs });
-        this.prefs = nextPrefs;
+        const saved = await this.invoke("save_ai_prefs", { prefs: nextPrefs });
+        this.prefs = saved;
         this.modelInput.value = suggested;
+        this.renderProfilesList();
         this.modelPicker.updateHeader();
         this.onToast?.(`Switched model to ${suggested}`);
       } catch (err) {
@@ -1379,6 +1666,76 @@ export class AiPanel {
       this.onToast?.(`Failed to save skill: ${err}`, true);
     } finally {
       this._applyingProposal = false;
+    }
+  }
+
+  async askAboutGraphNodes({ primaryNode, neighborNodes = [] }) {
+    if (!primaryNode) return;
+    await this.open();
+
+    const ordered = [primaryNode, ...neighborNodes.slice(0, 8)].filter(
+      (n) => n && n.exists
+    );
+    if (!ordered.length) {
+      this.onToast?.("Create this page first before sending it to AI", true);
+      return;
+    }
+
+    const existingTargets = new Set(
+      Array.from(this.inputEl.querySelectorAll(".ai-inline-link")).map((el) =>
+        String(el.dataset.target || "").toLowerCase()
+      )
+    );
+    const existingSlugs = new Set(
+      Array.from(this.inputEl.querySelectorAll(".ai-inline-skill")).map((el) =>
+        String(el.dataset.skillSlug || "").toLowerCase()
+      )
+    );
+
+    let added = 0;
+    for (const node of ordered) {
+      if (node.kind === "skill" && node.skill_slug) {
+        const slugLower = node.skill_slug.toLowerCase();
+        if (existingSlugs.has(slugLower)) continue;
+        existingSlugs.add(slugLower);
+        const matched = this.skills.find(
+          (s) => (s.slug || "").toLowerCase() === slugLower
+        );
+        const chip = createAiSkillChipEl(
+          node.skill_slug,
+          matched?.id || "",
+          matched?.description || ""
+        );
+        this.inputEl.appendChild(chip);
+        this.inputEl.appendChild(document.createTextNode(" "));
+        added++;
+      } else if (node.rel_path) {
+        const target = node.rel_path.replace(/\.md$/i, "");
+        const targetLower = target.toLowerCase();
+        if (existingTargets.has(targetLower)) continue;
+        existingTargets.add(targetLower);
+        const linkChip = createAiMentionLinkEl(target, node.label || "");
+        this.inputEl.appendChild(linkChip);
+        this.inputEl.appendChild(document.createTextNode(" "));
+        added++;
+      }
+    }
+
+    normalizeEmptyComposer(this.inputEl);
+    const sel = window.getSelection();
+    if (sel) {
+      const range = document.createRange();
+      range.selectNodeContents(this.inputEl);
+      range.collapse(false);
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+    this.inputEl.focus();
+
+    if (added > 0) {
+      this.onToast?.(
+        `Attached ${added} ${added === 1 ? "node" : "linked notes"} to AI composer`
+      );
     }
   }
 

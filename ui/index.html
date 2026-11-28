@@ -159,28 +159,42 @@
           </div>
         </section>
 
-        <!-- Block Editor Canvas -->
-        <div id="editor-scroll" class="editor-scroll" hidden>
-          <div class="document-sheet">
-            <div id="doc-header" class="doc-header">
-              <h1 id="doc-title" class="doc-title" title="Double-click to rename file"></h1>
-              <div id="doc-path-hint" class="doc-path-hint"></div>
+        <!-- Fast Folder Explorer View -->
+        <section id="folder-view" class="folder-view" aria-label="Folder Explorer" hidden></section>
+
+        <!-- Block Editor Stage (Left Collapsible Outline + Document Scroll) -->
+        <div id="editor-stage" class="editor-stage" hidden>
+          <button id="btn-toggle-outline" class="outline-toggle-btn" type="button" title="Toggle Document Outline (Ctrl+Shift+O)" aria-label="Toggle Document Outline">
+            <svg class="icon" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+              <circle cx="3.5" cy="5" r="1" fill="currentColor" stroke="none"/>
+              <path d="M7 5h8"/>
+              <path d="M7 9h7"/>
+              <path d="M7 13h5.5"/>
+            </svg>
+          </button>
+          <aside id="doc-outline-panel" class="doc-outline-panel" aria-label="Document Outline" hidden></aside>
+          <div id="editor-scroll" class="editor-scroll">
+            <div class="document-sheet">
+              <div id="doc-header" class="doc-header">
+                <h1 id="doc-title" class="doc-title" title="Double-click to rename file"></h1>
+                <div id="doc-path-hint" class="doc-path-hint"></div>
+              </div>
+
+              <div id="blocks-container" class="blocks-container"></div>
+
+              <div id="bottom-click-zone" class="bottom-click-zone" title="Click to add a block"></div>
+
+              <section id="backlinks-section" class="backlinks-section" hidden>
+                <button id="backlinks-toggle" class="backlinks-toggle" aria-expanded="true">
+                  <svg class="chevron-icon" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <path d="M3 4.5L6 7.5L9 4.5"/>
+                  </svg>
+                  <span>Backlinks</span>
+                  <span id="backlinks-count" class="backlinks-count">0</span>
+                </button>
+                <div id="backlinks-list" class="backlinks-list"></div>
+              </section>
             </div>
-
-            <div id="blocks-container" class="blocks-container"></div>
-
-            <div id="bottom-click-zone" class="bottom-click-zone" title="Click to add a block"></div>
-
-            <section id="backlinks-section" class="backlinks-section" hidden>
-              <button id="backlinks-toggle" class="backlinks-toggle" aria-expanded="true">
-                <svg class="chevron-icon" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5">
-                  <path d="M3 4.5L6 7.5L9 4.5"/>
-                </svg>
-                <span>Backlinks</span>
-                <span id="backlinks-count" class="backlinks-count">0</span>
-              </button>
-              <div id="backlinks-list" class="backlinks-list"></div>
-            </section>
           </div>
         </div>
 
@@ -190,25 +204,93 @@
         </div>
 
         <!-- Interactive Knowledge Graph View -->
-        <section id="graph-view" class="graph-view" aria-label="Knowledge Graph View" hidden>
-          <canvas id="graph-canvas" class="graph-canvas"></canvas>
+        <section id="graph-view" class="graph-view" data-mode="side" aria-label="Knowledge Graph View" hidden>
+          <div class="graph-side-header">
+            <div class="graph-side-header-left">
+              <span class="graph-side-title">GRAPH</span>
+              <span id="graph-side-stats" class="graph-side-stats">0 notes · 0 links</span>
+            </div>
+            <div class="graph-side-actions">
+              <button id="graph-side-local-toggle" class="icon-btn" type="button" title="Local 1-Hop Subgraph (L)" aria-label="Local 1-Hop Subgraph">
+                <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+                  <circle cx="8" cy="8" r="5"/>
+                  <circle cx="8" cy="8" r="1.6" fill="currentColor" stroke="none"/>
+                </svg>
+              </button>
+              <button id="graph-side-filter-toggle" class="icon-btn" type="button" title="Filter &amp; Display Options (/)" aria-label="Filter Options">
+                <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+                  <path d="M2.2 3.5h11.6L9.4 8.6v3.7l-2.8 1.2V8.6z"/>
+                </svg>
+              </button>
+              <button id="graph-side-refresh" class="icon-btn" type="button" title="Reset Graph to Default (R)" aria-label="Reset Graph to Default">
+                <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+                  <path d="M13 4.5A5.5 5.5 0 1 0 13.5 9"/>
+                  <path d="M13.5 2v3h-3"/>
+                </svg>
+              </button>
+              <button id="graph-expand-btn" class="icon-btn" type="button" title="Expand to Fullscreen" aria-label="Expand to Fullscreen">
+                <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+                  <path d="M9.8 2.5h3.7v3.7M13.5 2.5L9.2 6.8M6.2 13.5H2.5V9.8M2.5 13.5l4.3-4.3"/>
+                </svg>
+              </button>
+              <button id="graph-side-close-btn" class="icon-btn" type="button" title="Close Graph (Ctrl+G)" aria-label="Close Graph">
+                <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+                  <path d="M4 4l8 8M12 4l-8 8"/>
+                </svg>
+              </button>
+            </div>
+          </div>
+
           <div class="graph-controls">
-            <input id="graph-filter" class="graph-filter-input" type="search" placeholder="Filter notes..." autocomplete="off" />
-            <button id="graph-local-toggle" class="graph-pill-btn" title="Toggle Local 1-Hop Graph">Local</button>
-            <button id="graph-orphans-toggle" class="graph-pill-btn active" title="Show Unlinked Notes">Orphans</button>
-            <button id="graph-refresh" class="icon-btn" title="Re-layout Graph" aria-label="Refresh Graph">
+            <input id="graph-filter" class="graph-filter-input" type="search" placeholder="Filter notes or @skills (/)" autocomplete="off" />
+            <button id="graph-local-toggle" class="graph-pill-btn" type="button" title="Local 1-Hop Subgraph (L)">Local</button>
+            <button id="graph-orphans-toggle" class="graph-pill-btn active" type="button" title="Show Unlinked Notes">Orphans</button>
+            <button id="graph-arrows-toggle" class="graph-pill-btn active" type="button" title="Show Link Direction Arrows">Arrows</button>
+            <button id="graph-skills-toggle" class="graph-pill-btn active" type="button" title="Show @skill Nodes">Skills</button>
+            <button id="graph-refresh" class="graph-pill-btn graph-reset-btn" type="button" title="Reset Filters, Focus &amp; Layout to Default (R)" aria-label="Reset Graph to Default">
               <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
                 <path d="M13 4.5A5.5 5.5 0 1 0 13.5 9"/>
                 <path d="M13.5 2v3h-3"/>
               </svg>
+              <span>Reset</span>
             </button>
             <span id="graph-stats" class="graph-stats">0 notes · 0 links</span>
           </div>
-          <div class="graph-zoom-controls">
-            <button id="graph-zoom-in" class="graph-zoom-btn" title="Zoom In">+</button>
-            <button id="graph-zoom-out" class="graph-zoom-btn" title="Zoom Out">-</button>
-            <button id="graph-zoom-fit" class="graph-zoom-btn" title="Fit Graph to View">Fit</button>
+
+          <div class="graph-full-actions">
+            <button id="graph-dock-btn" class="graph-pill-btn graph-dock-btn" type="button" title="Dock Graph to Side Panel (Esc)">
+              <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35">
+                <rect x="2" y="2.5" width="12" height="11" rx="1.5"/>
+                <path d="M10 2.5v11"/>
+              </svg>
+              <span>Side</span>
+            </button>
+            <button id="graph-close-btn" class="icon-btn graph-close-btn" type="button" title="Close Graph (Ctrl+Shift+G)" aria-label="Close Graph">
+              <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+                <path d="M4 4l8 8M12 4l-8 8"/>
+              </svg>
+            </button>
           </div>
+
+          <div class="graph-canvas-wrap">
+            <canvas id="graph-canvas" class="graph-canvas" tabindex="-1"></canvas>
+            <div id="graph-legend" class="graph-legend" aria-label="Folder Legend"></div>
+            <aside id="graph-inspector" class="graph-inspector" aria-label="Selected Node Inspector" hidden></aside>
+            <div class="graph-zoom-controls">
+              <button id="graph-zoom-locate" class="graph-zoom-btn graph-zoom-locate-btn" type="button" title="Center on Current Note" aria-label="Center on Current Note">
+                <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+                  <circle cx="8" cy="8" r="4"/>
+                  <path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2"/>
+                  <circle cx="8" cy="8" r="1.2" fill="currentColor" stroke="none"/>
+                </svg>
+              </button>
+              <button id="graph-zoom-in" class="graph-zoom-btn" type="button" title="Zoom In">+</button>
+              <button id="graph-zoom-out" class="graph-zoom-btn" type="button" title="Zoom Out">-</button>
+              <button id="graph-zoom-fit" class="graph-zoom-btn" type="button" title="Fit Graph to View (F)">Fit</button>
+            </div>
+          </div>
+
+          <div id="graph-side-footer" class="graph-side-footer"></div>
         </section>
       </div>
 
@@ -247,7 +329,34 @@
           </div>
         </div>
       </section>
+
+      <!-- Slim Workspace Status Bar -->
+      <footer id="status-bar" class="status-bar" aria-label="Workspace status">
+        <div class="status-bar-left">
+          <button id="status-git-branch" class="status-item status-git-btn" type="button" title="Git branch · Click to toggle terminal" hidden>
+            <svg class="status-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="5" cy="3.5" r="1.5"/>
+              <circle cx="5" cy="12.5" r="1.5"/>
+              <circle cx="11.5" cy="6" r="1.5"/>
+              <path d="M5 5v6M11.5 7.5c0 2.2-1.8 3-4.5 3H5"/>
+            </svg>
+            <span id="status-git-branch-name"></span>
+          </button>
+          <button id="status-mode-btn" class="status-item status-mode-btn" type="button" title="Toggle Block / Raw Markdown (Ctrl+Shift+M)" hidden></button>
+        </div>
+        <div class="status-bar-right">
+          <span id="status-selection-badge" class="status-selection-badge" hidden></span>
+          <span id="status-words" class="status-metric" hidden></span>
+          <span id="status-chars" class="status-metric" hidden></span>
+          <span id="status-tokens" class="status-metric status-metric-tokens" hidden></span>
+          <span id="status-readtime" class="status-metric status-metric-subtle" hidden></span>
+        </div>
+      </footer>
     </main>
+
+    <!-- Right-Side Knowledge Graph Drawer Host -->
+    <div id="graph-resizer" class="graph-resizer" role="separator" aria-orientation="vertical" hidden></div>
+    <aside id="graph-side-host" class="graph-side-host" aria-label="Knowledge Graph Panel" hidden></aside>
 
     <!-- Right-Side AI Assistant Drawer -->
     <div id="ai-resizer" class="ai-resizer" role="separator" aria-orientation="vertical" hidden></div>
@@ -296,38 +405,53 @@
       <div id="ai-skills-drawer" class="ai-skills-drawer" hidden aria-label="AI Skills"></div>
 
       <div id="ai-settings-drawer" class="ai-settings-drawer" hidden>
-        <label class="ai-field">
-          <span>Provider</span>
-          <select id="ai-provider">
-            <option value="openai">OpenAI</option>
-            <option value="gemini">Google Gemini</option>
-            <option value="anthropic">Anthropic (Claude)</option>
-            <option value="openrouter">OpenRouter</option>
-            <option value="ollama">Ollama (Local)</option>
-            <option value="custom">Custom (OpenAI-compatible)</option>
-          </select>
-        </label>
-        <label class="ai-field">
-          <span>API Key <small>(encrypted in ~/.skillweaver/ai.prefs)</small></span>
-          <div class="ai-key-row">
-            <input id="ai-api-key" type="password" placeholder="Paste your API key..." autocomplete="off" />
-            <button id="ai-toggle-key" class="top-text-btn" type="button" title="Show/Hide Key">Eye</button>
+        <div id="ai-profiles-section" class="ai-profiles-section">
+          <div class="ai-profiles-header">
+            <span class="ai-profiles-title">Saved API Keys</span>
+            <button id="ai-btn-add-profile" class="top-text-btn" type="button">+ Add Key</button>
           </div>
-        </label>
-        <label class="ai-field">
-          <span>Model</span>
-          <div class="ai-model-row">
-            <input id="ai-model" type="text" placeholder="e.g. gemini-3.5-flash-lite" autocomplete="off" />
-            <button id="ai-btn-pick-model" class="top-text-btn ai-model-icon-btn" type="button" title="Show available models">▾</button>
-            <button id="ai-btn-fetch-models" class="top-text-btn ai-model-icon-btn" type="button" title="Fetch live models from provider">↻</button>
+          <div id="ai-profiles-list" class="ai-profiles-list"></div>
+        </div>
+
+        <div id="ai-profile-form" class="ai-profile-form" hidden>
+          <label class="ai-field">
+            <span>Key Label</span>
+            <input id="ai-profile-name" type="text" placeholder="e.g. Google API Key 1" autocomplete="off" />
+          </label>
+          <label class="ai-field">
+            <span>Provider</span>
+            <select id="ai-provider">
+              <option value="openai">OpenAI</option>
+              <option value="gemini">Google Gemini</option>
+              <option value="anthropic">Anthropic (Claude)</option>
+              <option value="openrouter">OpenRouter</option>
+              <option value="ollama">Ollama (Local)</option>
+              <option value="custom">Custom (OpenAI-compatible)</option>
+            </select>
+          </label>
+          <label class="ai-field">
+            <span>API Key <small>(encrypted in ~/.skillweaver/ai.prefs)</small></span>
+            <div class="ai-key-row">
+              <input id="ai-api-key" type="password" placeholder="Paste your API key..." autocomplete="off" />
+              <button id="ai-toggle-key" class="top-text-btn" type="button" title="Show/Hide Key">Eye</button>
+            </div>
+          </label>
+          <label class="ai-field">
+            <span>Model</span>
+            <div class="ai-model-row">
+              <input id="ai-model" type="text" placeholder="e.g. gemini-3.5-flash-lite" autocomplete="off" />
+              <button id="ai-btn-pick-model" class="top-text-btn ai-model-icon-btn" type="button" title="Show available models">▾</button>
+              <button id="ai-btn-fetch-models" class="top-text-btn ai-model-icon-btn" type="button" title="Fetch live models from provider">↻</button>
+            </div>
+          </label>
+          <label class="ai-field">
+            <span>Base URL</span>
+            <input id="ai-base-url" type="text" placeholder="https://..." autocomplete="off" />
+          </label>
+          <div class="ai-settings-actions ai-profile-form-actions">
+            <button id="ai-cancel-profile" class="secondary-btn" type="button">Cancel</button>
+            <button id="ai-save-settings" class="primary-btn" type="button">Save Key</button>
           </div>
-        </label>
-        <label class="ai-field">
-          <span>Base URL</span>
-          <input id="ai-base-url" type="text" placeholder="https://..." autocomplete="off" />
-        </label>
-        <div class="ai-settings-actions">
-          <button id="ai-save-settings" class="primary-btn" type="button">Save Settings</button>
         </div>
       </div>
 
@@ -447,7 +571,7 @@
   <!-- Toast Notification -->
   <div id="toast" class="toast" hidden role="status"></div>
 
-  <script src="vendor/prism.min.js" data-manual></script>
+  <script src="vendor/prism.min.js" data-manual defer></script>
   <script type="module" src="app.js"></script>
 </body>
 </html>

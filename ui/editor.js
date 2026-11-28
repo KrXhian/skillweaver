@@ -414,6 +414,53 @@ function readFileAsDataUrl(file) {
   });
 }
 
+function insertPastedInlineMarkdown(targetEl, plain, pageLookup) {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) return;
+  const range = sel.getRangeAt(0);
+  if (!targetEl.contains(range.startContainer)) return;
+
+  const normalized = String(plain || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  range.deleteContents();
+
+  const anchorEl =
+    range.startContainer.nodeType === Node.ELEMENT_NODE
+      ? range.startContainer
+      : range.startContainer.parentElement;
+  if (anchorEl?.closest("code")) {
+    const tn = document.createTextNode(normalized);
+    range.insertNode(tn);
+    range.setStartAfter(tn);
+    range.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(range);
+    return;
+  }
+
+  const tpl = document.createElement("template");
+  tpl.innerHTML = inlineMarkdownToHtml(normalized, pageLookup);
+  const frag = tpl.content;
+  const lastNode = frag.lastChild;
+  if (!lastNode) return;
+
+  let trailing = null;
+  if (lastNode.nodeType === Node.ELEMENT_NODE && lastNode.tagName !== "BR") {
+    trailing = document.createTextNode("\u200B");
+    frag.appendChild(trailing);
+  }
+
+  range.insertNode(frag);
+  const nextRange = document.createRange();
+  if (trailing) {
+    nextRange.setStart(trailing, 1);
+  } else {
+    nextRange.setStartAfter(lastNode);
+  }
+  nextRange.collapse(true);
+  sel.removeAllRanges();
+  sel.addRange(nextRange);
+}
+
 function getCaretOffsetInText(root) {
   const sel = window.getSelection();
   if (!sel || sel.rangeCount === 0) return 0;
@@ -566,6 +613,7 @@ export class BlockEditor {
     this.onBlockSelectionChange = onBlockSelectionChange;
 
     this.blocks = [];
+    this.docGen = 0;
     this.collapsedIds = new Set();
     this.selectedBlockIds = new Set();
     this.lastSelectedBlockId = null;
@@ -930,6 +978,7 @@ export class BlockEditor {
   }
 
   loadDocument(blocks, collapsedIndices = []) {
+    this.docGen += 1;
     this.blocks = blocks?.length
       ? cloneBlocks(blocks)
       : [{ id: genBlockId(), type: "paragraph", content: "" }];
@@ -940,8 +989,6 @@ export class BlockEditor {
     this.containerEl.classList.remove("has-block-selection");
     this.cleanupMarquee();
     this.suppressNextBottomClick = false;
-    this.notifyBlockSelectionChange();
-    this.updateBlockSelectionBar();
     for (const idx of collapsedIndices || []) {
       const b = this.blocks[idx];
       if (b && b.type === "heading") {
@@ -960,6 +1007,8 @@ export class BlockEditor {
     this.linkAutocomplete.close();
     this.hideSelectionToolbar();
     this.render();
+    this.notifyBlockSelectionChange();
+    this.updateBlockSelectionBar();
   }
 
   isInteracting() {
@@ -1032,6 +1081,7 @@ export class BlockEditor {
     this.syncAllEditableFromDom();
     this.pushUndoSnapshot();
 
+    this.docGen += 1;
     this.blocks = blocks?.length
       ? cloneBlocks(blocks)
       : [{ id: genBlockId(), type: "paragraph", content: "" }];
@@ -1043,8 +1093,6 @@ export class BlockEditor {
     this.containerEl.classList.remove("has-block-selection");
     this.cleanupMarquee();
     this.suppressNextBottomClick = false;
-    this.notifyBlockSelectionChange();
-    this.updateBlockSelectionBar();
 
     if (viewState?.collapsedHeadings?.length) {
       const headingsByKeyOcc = new Map();
@@ -1081,6 +1129,8 @@ export class BlockEditor {
     this.linkAutocomplete.close();
     this.hideSelectionToolbar();
     this.render();
+    this.notifyBlockSelectionChange();
+    this.updateBlockSelectionBar();
 
     const scrollEl = this.containerEl.closest(".editor-scroll");
     const targetScrollTop = typeof viewState?.scrollTop === "number" ? viewState.scrollTop : null;
@@ -1282,6 +1332,7 @@ export class BlockEditor {
   }
 
   syncAllEditableFromDom() {
+    if (this.containerEl.dataset.docGen !== String(this.docGen)) return;
     this.containerEl.querySelectorAll(".block-editable").forEach((el) => {
       const row = el.closest(".block-row");
       const id = row?.dataset.id;
@@ -1372,6 +1423,7 @@ export class BlockEditor {
     const { visible, hiddenCounts, depths } = this.computeVisibility();
 
     this.containerEl.innerHTML = "";
+    this.containerEl.dataset.docGen = String(this.docGen);
     const frag = document.createDocumentFragment();
     let numberedSeq = 0;
 
@@ -1656,7 +1708,8 @@ export class BlockEditor {
       const editable = document.createElement("div");
       editable.className = "block-editable";
       editable.contentEditable = "true";
-      editable.spellcheck = true;
+      editable.spellcheck = false;
+      editable.setAttribute("spellcheck", "false");
       editable.dataset.placeholder =
         block.type === "heading"
           ? `Heading ${block.level}`
@@ -2069,7 +2122,8 @@ export class BlockEditor {
         const cellEditable = document.createElement("div");
         cellEditable.className = "table-cell-editable";
         cellEditable.contentEditable = "true";
-        cellEditable.spellcheck = true;
+        cellEditable.spellcheck = false;
+        cellEditable.setAttribute("spellcheck", "false");
         cellEditable.dataset.row = String(r);
         cellEditable.dataset.col = String(c);
         cellEditable.dataset.placeholder = r === 0 ? `Col ${c + 1}` : "";
@@ -2912,30 +2966,7 @@ export class BlockEditor {
       }
 
       this.pushUndoSnapshot();
-      const sel = window.getSelection();
-      if (!sel || sel.rangeCount === 0) return;
-      const range = sel.getRangeAt(0);
-      range.deleteContents();
-      const lines = plain.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
-      const frag = document.createDocumentFragment();
-      let lastNode = null;
-      lines.forEach((line, i) => {
-        if (i > 0) {
-          const br = document.createElement("br");
-          frag.appendChild(br);
-          lastNode = br;
-        }
-        const tn = document.createTextNode(line);
-        frag.appendChild(tn);
-        lastNode = tn;
-      });
-      range.insertNode(frag);
-      if (lastNode) {
-        range.setStartAfter(lastNode);
-        range.collapse(true);
-        sel.removeAllRanges();
-        sel.addRange(range);
-      }
+      insertPastedInlineMarkdown(cellEl, plain, buildPageLookup(this.getPages()));
       cellEl.dispatchEvent(new Event("input", { bubbles: true }));
     });
 
@@ -2954,8 +2985,21 @@ export class BlockEditor {
       this.onDirty();
     });
 
+    cellEl.addEventListener("focus", () => {
+      cellEl.spellcheck = true;
+      cellEl.setAttribute("spellcheck", "true");
+    });
+
     cellEl.addEventListener("blur", () => {
       undoArmed = true;
+      cellEl.spellcheck = false;
+      cellEl.setAttribute("spellcheck", "false");
+      const idx = this.blocks.findIndex((b) => b.id === blockId);
+      if (idx !== -1) {
+        const rawMd = domToInlineMarkdown(cellEl);
+        this.syncEditableElToBlock(cellEl, idx);
+        cellEl.innerHTML = inlineMarkdownToHtml(rawMd, buildPageLookup(this.getPages()));
+      }
     });
 
     cellEl.addEventListener("keydown", (e) => {
@@ -3198,16 +3242,7 @@ export class BlockEditor {
       }
 
       this.pushUndoSnapshot();
-      const sel = window.getSelection();
-      if (!sel || sel.rangeCount === 0) return;
-      const range = sel.getRangeAt(0);
-      range.deleteContents();
-      const node = document.createTextNode(plain);
-      range.insertNode(node);
-      range.setStartAfter(node);
-      range.collapse(true);
-      sel.removeAllRanges();
-      sel.addRange(range);
+      insertPastedInlineMarkdown(editable, plain, buildPageLookup(this.getPages()));
       editable.dispatchEvent(new Event("input", { bubbles: true }));
     });
 
@@ -3334,8 +3369,21 @@ export class BlockEditor {
       this.onDirty();
     });
 
+    editable.addEventListener("focus", () => {
+      editable.spellcheck = true;
+      editable.setAttribute("spellcheck", "true");
+    });
+
     editable.addEventListener("blur", () => {
       undoArmed = true;
+      editable.spellcheck = false;
+      editable.setAttribute("spellcheck", "false");
+      const idx = this.blocks.findIndex((b) => b.id === blockId);
+      if (idx !== -1) {
+        const rawMd = domToInlineMarkdown(editable);
+        this.blocks[idx].content = rawMd;
+        editable.innerHTML = inlineMarkdownToHtml(rawMd, buildPageLookup(this.getPages()));
+      }
     });
 
     editable.addEventListener("keydown", (e) => {
@@ -3744,6 +3792,8 @@ export class BlockEditor {
       const wrapper = document.createElement(tagName.toLowerCase());
       if (tagName === "CODE") {
         wrapper.className = "inline-code";
+        wrapper.spellcheck = false;
+        wrapper.setAttribute("spellcheck", "false");
       } else if (tagName === "MARK") {
         wrapper.className = "inline-highlight";
       }
@@ -4939,6 +4989,47 @@ export class BlockEditor {
     const row = this.containerEl.querySelector(`.block-row[data-id="${CSS.escape(targetId)}"]`);
     if (row) {
       row.scrollIntoView({ behavior: "smooth", block: "center" });
+      row.classList.remove("block-highlight-flash");
+      void row.offsetWidth;
+      row.classList.add("block-highlight-flash");
+      setTimeout(() => row.classList.remove("block-highlight-flash"), 2000);
+      return true;
+    }
+    return false;
+  }
+
+  scrollToBlockIndex(targetIdx) {
+    if (typeof targetIdx !== "number" || targetIdx < 0 || targetIdx >= this.blocks.length) {
+      return false;
+    }
+
+    let changedCollapse = false;
+    const stack = [];
+    for (let i = 0; i < targetIdx; i++) {
+      const b = this.blocks[i];
+      if (b.type === "heading") {
+        while (stack.length && stack[stack.length - 1].level >= b.level) {
+          stack.pop();
+        }
+        stack.push({ id: b.id, level: b.level });
+      }
+    }
+    for (const ancestor of stack) {
+      if (this.collapsedIds.has(ancestor.id)) {
+        this.collapsedIds.delete(ancestor.id);
+        changedCollapse = true;
+      }
+    }
+
+    if (changedCollapse) {
+      this.render();
+      this.onCollapseChange(this.getCollapsedIndices());
+    }
+
+    const targetId = this.blocks[targetIdx].id;
+    const row = this.containerEl.querySelector(`.block-row[data-id="${CSS.escape(targetId)}"]`);
+    if (row) {
+      row.scrollIntoView({ behavior: "smooth", block: "start" });
       row.classList.remove("block-highlight-flash");
       void row.offsetWidth;
       row.classList.add("block-highlight-flash");
