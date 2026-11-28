@@ -29,11 +29,13 @@ pub use chats::{
 pub use http::extract_http_error_message;
 pub use models::{
     build_list_models_request, canonical_cache_key, list_models, load_models_cache,
-    load_models_cache_from, models_cache_path, parse_models_response, save_models_cache_to,
-    AiListModelsRequest, AiModelInfo, CachedModelList, ListModelsHttpRequest, ModelsCache,
+    load_models_cache_from, models_cache_path, parse_models_response, profile_cache_key,
+    save_models_cache_to, AiListModelsRequest, AiModelInfo, CachedModelList, ListModelsHttpRequest,
+    ModelsCache,
 };
 pub use prefs::{
-    ai_prefs_path, load_ai_prefs, load_ai_prefs_from, save_ai_prefs, save_ai_prefs_to, AiPrefs,
+    ai_prefs_path, load_ai_prefs, load_ai_prefs_from, normalize_ai_prefs, save_ai_prefs,
+    save_ai_prefs_to, AiPrefs, AiProviderProfile,
 };
 pub use skills::{
     delete_skill, delete_skill_in, format_skill_markdown, global_skills_dir, list_skills,

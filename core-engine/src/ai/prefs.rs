@@ -13,11 +13,95 @@
 // limitations under the License.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 const DPAPI_PREFIX: &str = "dpapi:";
+
+fn norm_provider(raw: &str) -> String {
+    let trimmed = raw.trim().to_ascii_lowercase();
+    if trimmed.is_empty() {
+        "openai".to_string()
+    } else {
+        trimmed
+    }
+}
+
+fn provider_display_label(provider: &str) -> &'static str {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "gemini" => "Google Gemini",
+        "anthropic" => "Anthropic (Claude)",
+        "openrouter" => "OpenRouter",
+        "ollama" => "Ollama (Local)",
+        "custom" => "Custom",
+        _ => "OpenAI",
+    }
+}
+
+fn default_base_url(provider: &str) -> &'static str {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "gemini" => "https://generativelanguage.googleapis.com/v1beta",
+        "anthropic" => "https://api.anthropic.com/v1/messages",
+        "openrouter" => "https://openrouter.ai/api/v1/chat/completions",
+        "ollama" => "http://localhost:11434/v1/chat/completions",
+        "custom" => "http://localhost:1234/v1/chat/completions",
+        _ => "https://api.openai.com/v1/chat/completions",
+    }
+}
+
+fn norm_base_url(provider: &str, raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        default_base_url(provider).to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Named BYOK provider profile supporting multiple keys per provider or across providers.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct AiProviderProfile {
+    pub id: String,
+    pub name: String,
+    pub provider: String,
+    pub api_key: String,
+    pub base_url: String,
+    pub model: String,
+}
+
+impl fmt::Debug for AiProviderProfile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let masked_key = if self.api_key.is_empty() {
+            ""
+        } else {
+            "[REDACTED]"
+        };
+        f.debug_struct("AiProviderProfile")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("provider", &self.provider)
+            .field("api_key", &masked_key)
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .finish()
+    }
+}
+
+impl Default for AiProviderProfile {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: "OpenAI".to_string(),
+            provider: "openai".to_string(),
+            api_key: String::new(),
+            base_url: default_base_url("openai").to_string(),
+            model: String::new(),
+        }
+    }
+}
 
 /// User-configured BYOK AI provider settings stored at `%USERPROFILE%\.skillweaver\ai.prefs`
 /// (API keys are DPAPI-encrypted at rest on Windows).
@@ -28,6 +112,10 @@ pub struct AiPrefs {
     pub api_key: String,
     pub base_url: String,
     pub model: String,
+    #[serde(default)]
+    pub active_profile_id: Option<String>,
+    #[serde(default)]
+    pub profiles: Vec<AiProviderProfile>,
 }
 
 impl fmt::Debug for AiPrefs {
@@ -42,6 +130,8 @@ impl fmt::Debug for AiPrefs {
             .field("api_key", &masked_key)
             .field("base_url", &self.base_url)
             .field("model", &self.model)
+            .field("active_profile_id", &self.active_profile_id)
+            .field("profiles", &self.profiles)
             .finish()
     }
 }
@@ -51,10 +141,87 @@ impl Default for AiPrefs {
         Self {
             provider: "openai".to_string(),
             api_key: String::new(),
-            base_url: "https://api.openai.com/v1/chat/completions".to_string(),
+            base_url: default_base_url("openai").to_string(),
             model: String::new(),
+            active_profile_id: None,
+            profiles: Vec::new(),
         }
     }
+}
+
+/// Migrates legacy single-key prefs into `profiles` and keeps top-level active fields synced.
+pub fn normalize_ai_prefs(prefs: &mut AiPrefs) {
+    if prefs.profiles.is_empty() {
+        let has_legacy = !prefs.api_key.trim().is_empty()
+            || !prefs.model.trim().is_empty()
+            || (!prefs.provider.trim().is_empty()
+                && !prefs.provider.trim().eq_ignore_ascii_case("openai"));
+        if has_legacy {
+            let provider = norm_provider(&prefs.provider);
+            let base_url = norm_base_url(&provider, &prefs.base_url);
+            let model = prefs.model.trim().to_string();
+            let api_key = prefs.api_key.trim().to_string();
+            prefs.profiles.push(AiProviderProfile {
+                id: "prof-default".to_string(),
+                name: provider_display_label(&provider).to_string(),
+                provider,
+                api_key,
+                base_url,
+                model,
+            });
+            prefs.active_profile_id = Some("prof-default".to_string());
+        } else {
+            prefs.active_profile_id = None;
+            prefs.provider = "openai".to_string();
+            prefs.base_url = default_base_url("openai").to_string();
+            prefs.api_key.clear();
+            prefs.model.clear();
+            return;
+        }
+    }
+
+    let mut seen_ids = HashSet::new();
+    let mut seq = 1usize;
+    for profile in &mut prefs.profiles {
+        profile.provider = norm_provider(&profile.provider);
+        profile.base_url = norm_base_url(&profile.provider, &profile.base_url);
+        profile.api_key = profile.api_key.trim().to_string();
+        profile.model = profile.model.trim().to_string();
+
+        let trimmed_name = profile.name.trim();
+        profile.name = if trimmed_name.is_empty() {
+            provider_display_label(&profile.provider).to_string()
+        } else {
+            trimmed_name.to_string()
+        };
+
+        let candidate_id = profile.id.trim().to_string();
+        if candidate_id.is_empty() || !seen_ids.insert(candidate_id.clone()) {
+            loop {
+                let next_id = format!("prof-{seq}");
+                seq += 1;
+                if seen_ids.insert(next_id.clone()) {
+                    profile.id = next_id;
+                    break;
+                }
+            }
+        } else {
+            profile.id = candidate_id;
+        }
+    }
+
+    let active_idx = prefs
+        .active_profile_id
+        .as_deref()
+        .and_then(|active| prefs.profiles.iter().position(|p| p.id == active))
+        .unwrap_or(0);
+
+    let active = &prefs.profiles[active_idx];
+    prefs.active_profile_id = Some(active.id.clone());
+    prefs.provider = active.provider.clone();
+    prefs.api_key = active.api_key.clone();
+    prefs.base_url = active.base_url.clone();
+    prefs.model = active.model.clone();
 }
 
 #[cfg(windows)]
@@ -225,6 +392,9 @@ pub fn load_ai_prefs_from(path: &Path) -> AiPrefs {
     let mut prefs = serde_json::from_str::<AiPrefs>(&raw).unwrap_or_default();
 
     #[cfg(windows)]
+    let mut migrated_plaintext = false;
+
+    #[cfg(windows)]
     {
         if prefs.api_key.starts_with(DPAPI_PREFIX) {
             match dpapi::unprotect(&prefs.api_key) {
@@ -232,9 +402,27 @@ pub fn load_ai_prefs_from(path: &Path) -> AiPrefs {
                 Err(_) => prefs.api_key.clear(),
             }
         } else if !prefs.api_key.is_empty() {
-            // Transparently migrate legacy plaintext keys to DPAPI encryption on disk.
-            let _ = save_ai_prefs_to(path, &prefs);
+            migrated_plaintext = true;
         }
+
+        for profile in &mut prefs.profiles {
+            if profile.api_key.starts_with(DPAPI_PREFIX) {
+                match dpapi::unprotect(&profile.api_key) {
+                    Ok(plain) => profile.api_key = plain,
+                    Err(_) => profile.api_key.clear(),
+                }
+            } else if !profile.api_key.is_empty() {
+                migrated_plaintext = true;
+            }
+        }
+    }
+
+    normalize_ai_prefs(&mut prefs);
+
+    #[cfg(windows)]
+    if migrated_plaintext {
+        // Transparently migrate legacy plaintext keys to DPAPI encryption on disk.
+        let _ = save_ai_prefs_to(path, &prefs);
     }
 
     prefs
@@ -254,10 +442,17 @@ pub fn save_ai_prefs_to(path: &Path, prefs: &AiPrefs) -> Result<(), String> {
     }
 
     let mut to_store = prefs.clone();
+    normalize_ai_prefs(&mut to_store);
+
     #[cfg(windows)]
     {
         if !to_store.api_key.is_empty() && !to_store.api_key.starts_with(DPAPI_PREFIX) {
             to_store.api_key = dpapi::protect(&to_store.api_key)?;
+        }
+        for profile in &mut to_store.profiles {
+            if !profile.api_key.is_empty() && !profile.api_key.starts_with(DPAPI_PREFIX) {
+                profile.api_key = dpapi::protect(&profile.api_key)?;
+            }
         }
     }
 
@@ -305,6 +500,7 @@ mod tests {
             api_key: "sk-test-123".to_string(),
             base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
             model: "gemini-2.5-flash".to_string(),
+            ..AiPrefs::default()
         };
         save_ai_prefs_to(&path, &prefs).unwrap();
 
@@ -315,7 +511,12 @@ mod tests {
             assert!(!disk_raw.contains("sk-test-123"));
         }
 
-        assert_eq!(load_ai_prefs_from(&path), prefs);
+        let loaded = load_ai_prefs_from(&path);
+        assert_eq!(loaded.provider, "gemini");
+        assert_eq!(loaded.api_key, "sk-test-123");
+        assert_eq!(loaded.model, "gemini-2.5-flash");
+        assert_eq!(loaded.profiles.len(), 1);
+        assert_eq!(loaded.active_profile_id.as_deref(), Some("prof-default"));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -370,13 +571,112 @@ mod tests {
     fn ai_prefs_debug_redacts_api_key() {
         let secret_prefs = AiPrefs {
             api_key: "sk-live-super-secret".to_string(),
+            profiles: vec![AiProviderProfile {
+                id: "prof-1".to_string(),
+                name: "Google 1".to_string(),
+                provider: "gemini".to_string(),
+                api_key: "AIzaSecret999".to_string(),
+                base_url: default_base_url("gemini").to_string(),
+                model: "gemini-3.5-flash-lite".to_string(),
+            }],
             ..AiPrefs::default()
         };
         let dbg = format!("{secret_prefs:?}");
         assert!(dbg.contains("[REDACTED]"));
         assert!(!dbg.contains("sk-live-super-secret"));
+        assert!(!dbg.contains("AIzaSecret999"));
 
         let empty_dbg = format!("{:?}", AiPrefs::default());
         assert!(!empty_dbg.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn multi_profile_round_trip_encrypts_every_key_and_syncs_active_profile() {
+        let dir = temp_dir("multi_profiles");
+        let path = dir.join("ai.prefs");
+        let prefs = AiPrefs {
+            active_profile_id: Some("g2".to_string()),
+            profiles: vec![
+                AiProviderProfile {
+                    id: "g1".to_string(),
+                    name: "Google API Key 1".to_string(),
+                    provider: "gemini".to_string(),
+                    api_key: "AIza-first-key".to_string(),
+                    base_url: default_base_url("gemini").to_string(),
+                    model: "gemini-2.5-flash".to_string(),
+                },
+                AiProviderProfile {
+                    id: "g2".to_string(),
+                    name: "Google API Key 2".to_string(),
+                    provider: "gemini".to_string(),
+                    api_key: "AIza-second-key".to_string(),
+                    base_url: default_base_url("gemini").to_string(),
+                    model: "gemini-2.5-pro".to_string(),
+                },
+                AiProviderProfile {
+                    id: "oa1".to_string(),
+                    name: "OpenAI API Key 1".to_string(),
+                    provider: "openai".to_string(),
+                    api_key: "sk-openai-secret".to_string(),
+                    base_url: default_base_url("openai").to_string(),
+                    model: "gpt-4o".to_string(),
+                },
+                AiProviderProfile {
+                    id: "or1".to_string(),
+                    name: "OpenRouter API Key 1".to_string(),
+                    provider: "openrouter".to_string(),
+                    api_key: "sk-or-secret".to_string(),
+                    base_url: default_base_url("openrouter").to_string(),
+                    model: "anthropic/claude-3.5-sonnet".to_string(),
+                },
+            ],
+            ..AiPrefs::default()
+        };
+
+        save_ai_prefs_to(&path, &prefs).unwrap();
+
+        #[cfg(windows)]
+        {
+            let disk_raw = fs::read_to_string(&path).unwrap();
+            assert!(!disk_raw.contains("AIza-first-key"));
+            assert!(!disk_raw.contains("AIza-second-key"));
+            assert!(!disk_raw.contains("sk-openai-secret"));
+            assert!(!disk_raw.contains("sk-or-secret"));
+            assert!(disk_raw.contains(DPAPI_PREFIX));
+        }
+
+        let loaded = load_ai_prefs_from(&path);
+        assert_eq!(loaded.profiles.len(), 4);
+        assert_eq!(loaded.active_profile_id.as_deref(), Some("g2"));
+        assert_eq!(loaded.provider, "gemini");
+        assert_eq!(loaded.api_key, "AIza-second-key");
+        assert_eq!(loaded.model, "gemini-2.5-pro");
+        assert_eq!(loaded.profiles[0].api_key, "AIza-first-key");
+        assert_eq!(loaded.profiles[2].api_key, "sk-openai-secret");
+        assert_eq!(loaded.profiles[3].api_key, "sk-or-secret");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_single_key_auto_migrates_into_first_profile() {
+        let dir = temp_dir("legacy_to_profile");
+        let path = dir.join("ai.prefs");
+        let raw_json = serde_json::json!({
+            "provider": "gemini",
+            "api_key": "AIzaLegacySingle",
+            "base_url": "https://generativelanguage.googleapis.com/v1beta",
+            "model": "gemini-3.5-flash-lite"
+        });
+        fs::write(&path, serde_json::to_string_pretty(&raw_json).unwrap()).unwrap();
+
+        let loaded = load_ai_prefs_from(&path);
+        assert_eq!(loaded.active_profile_id.as_deref(), Some("prof-default"));
+        assert_eq!(loaded.profiles.len(), 1);
+        assert_eq!(loaded.profiles[0].name, "Google Gemini");
+        assert_eq!(loaded.profiles[0].api_key, "AIzaLegacySingle");
+        assert_eq!(loaded.profiles[0].model, "gemini-3.5-flash-lite");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

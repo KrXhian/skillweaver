@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://krxhian.github.io/skillweaver/sitemap.xml

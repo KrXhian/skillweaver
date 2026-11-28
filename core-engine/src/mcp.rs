@@ -168,7 +168,7 @@ fn tools_definitions() -> Value {
         },
         {
             "name": "get_vault_graph",
-            "description": "Return the vault link graph (nodes including unresolved ghost nodes, plus directed wikilink edges).",
+            "description": "Return the vault link graph including node kind ('note' | 'skill' | 'ghost'), skill_slug, folder, in_degree, out_degree, est_tokens, and edge citation weight so LLMs can inspect relationship strengths, hubs, and cluster token budgets in one call.",
             "inputSchema": {
                 "type": "object",
                 "properties": {},

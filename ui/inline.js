@@ -111,6 +111,8 @@ export function createPageLinkElement(target, label = "", exists = true) {
   const span = document.createElement("span");
   span.className = exists ? "page-link" : "page-link page-link-missing";
   span.setAttribute("contenteditable", "false");
+  span.spellcheck = false;
+  span.setAttribute("spellcheck", "false");
   span.dataset.target = target;
   if (label) {
     span.dataset.label = label;
@@ -124,7 +126,7 @@ function renderLinkHtml(target, label, pageLookup) {
   const cls = exists ? "page-link" : "page-link page-link-missing";
   const labelAttr = label ? ` data-label="${escapeHtml(label)}"` : "";
   const display = escapeHtml(displayNameForLink(target, label));
-  return `<span class="${cls}" contenteditable="false" data-target="${escapeHtml(target)}"${labelAttr}>${display}</span>`;
+  return `<span class="${cls}" contenteditable="false" spellcheck="false" data-target="${escapeHtml(target)}"${labelAttr}>${display}</span>`;
 }
 
 function tokenizeInline(text, pageLookup, insideBold = false, insideItalic = false) {
@@ -147,7 +149,7 @@ function tokenizeInline(text, pageLookup, insideBold = false, insideItalic = fal
       if (close !== -1) {
         const codeContent = text.slice(i + 1, close);
         if (!codeContent.includes("\n")) {
-          out += `<code class="inline-code">${escapeHtml(codeContent)}</code>`;
+          out += `<code class="inline-code" spellcheck="false">${escapeHtml(codeContent)}</code>`;
           i = close + 1;
           continue;
         }
@@ -446,6 +448,8 @@ export function tryAutoFormatInline(el) {
 
     const codeEl = document.createElement("code");
     codeEl.className = "inline-code";
+    codeEl.spellcheck = false;
+    codeEl.setAttribute("spellcheck", "false");
     codeEl.textContent = inside;
 
     const parent = textNode.parentNode;

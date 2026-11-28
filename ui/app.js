@@ -15,9 +15,16 @@
 import { AiPanel } from "./ai.js";
 import { DiffModal } from "./diff.js";
 import { BlockEditor } from "./editor.js";
+import { FolderView } from "./folder.js";
 import { GraphView } from "./graph.js";
 import { escapeHtml } from "./inline.js";
 import { QuickSwitcher } from "./links.js";
+import {
+  computeTextMetrics,
+  extractBlocksMetrics,
+  extractRawMarkdownMetrics,
+} from "./metrics.js";
+import { DocOutline } from "./outline.js";
 import { ModalDialog, SidebarController } from "./sidebar.js";
 import { TerminalPanel } from "./terminal.js";
 
@@ -36,6 +43,7 @@ function tauriListen(eventName, handler) {
 }
 
 const el = {
+  appEl: document.getElementById("app"),
   vaultName: document.getElementById("vault-name"),
   btnVaultName: document.getElementById("btn-vault-name"),
   btnOpenFolder: document.getElementById("btn-open-folder"),
@@ -54,8 +62,13 @@ const el = {
   btnWelcomeNew: document.getElementById("btn-welcome-new"),
   welcomeSubtitle: document.getElementById("welcome-subtitle"),
   welcomeView: document.getElementById("welcome-view"),
+  folderView: document.getElementById("folder-view"),
+  editorStage: document.getElementById("editor-stage"),
   editorScroll: document.getElementById("editor-scroll"),
   rawEditorView: document.getElementById("raw-editor-view"),
+  workspaceBody: document.querySelector(".workspace-body"),
+  graphResizer: document.getElementById("graph-resizer"),
+  graphSideHost: document.getElementById("graph-side-host"),
   graphView: document.getElementById("graph-view"),
   rawTextarea: document.getElementById("raw-textarea"),
   breadcrumb: document.getElementById("breadcrumb"),
@@ -73,6 +86,14 @@ const el = {
   btnConflictDiff: document.getElementById("btn-conflict-diff"),
   btnConflictKeep: document.getElementById("btn-conflict-keep"),
   btnConflictReload: document.getElementById("btn-conflict-reload"),
+  statusGitBranch: document.getElementById("status-git-branch"),
+  statusGitBranchName: document.getElementById("status-git-branch-name"),
+  statusModeBtn: document.getElementById("status-mode-btn"),
+  statusSelectionBadge: document.getElementById("status-selection-badge"),
+  statusWords: document.getElementById("status-words"),
+  statusChars: document.getElementById("status-chars"),
+  statusTokens: document.getElementById("status-tokens"),
+  statusReadtime: document.getElementById("status-readtime"),
   toast: document.getElementById("toast"),
 };
 
@@ -95,9 +116,12 @@ const state = {
   },
   vault: null,
   currentFile: null,
+  currentFolderView: null,
   rawMode: false,
-  graphMode: false,
+  graphDisplayMode: "closed", // "closed" | "side" | "fullscreen"
   isDirty: false,
+  statusMetricsTimer: null,
+  statusSelectionTimer: null,
   lastKnownDiskHash: null,
   lastKnownMtimeMs: null,
   lastKnownDiskMd: null,
@@ -109,12 +133,34 @@ const state = {
   fsEventQueueRunning: false,
   pendingFsEvent: null,
   deferredHotReloadTimer: null,
+  deferredAiRefreshTimer: null,
+  backlinksRequestSeq: 0,
 };
 
 const imageCache = new Map();
 
 function imageCacheKey(src) {
   return `${state.currentFile || ""}::${src}`;
+}
+
+function isGraphOpen() {
+  return state.graphDisplayMode === "side" || state.graphDisplayMode === "fullscreen";
+}
+
+function isGraphSide() {
+  return state.graphDisplayMode === "side";
+}
+
+function isGraphFullscreen() {
+  return state.graphDisplayMode === "fullscreen";
+}
+
+function setRightDrawerWidth(width) {
+  const clamped = Math.min(560, Math.max(260, Number(width) || 340));
+  if (el.graphSideHost) {
+    el.graphSideHost.style.width = `${clamped}px`;
+  }
+  aiPanel.setWidth(clamped);
 }
 
 function showToast(message, isError = false) {
@@ -175,7 +221,9 @@ function applyTheme(theme) {
   const normalized = theme === "light" ? "light" : "dark";
   state.prefs.theme = normalized;
   document.documentElement.setAttribute("data-theme", normalized);
-  if (state.graphMode && typeof graphView !== "undefined") {
+  if (isGraphOpen() && typeof graphView !== "undefined") {
+    graphView.renderLegend();
+    graphView.renderSideFooter();
     graphView.draw();
   }
 }
@@ -248,6 +296,7 @@ const sidebar = new SidebarController(
   },
   {
     onOpenFile: (relPath) => openNote(relPath),
+    onOpenFolder: (relDir) => openFolderView(relDir),
     onNewNote: (folderRel) => promptCreateNote(folderRel),
     onNewFolder: (folderRel) => promptCreateFolder(folderRel),
     onRename: (node) => promptRenameEntry(node),
@@ -257,6 +306,37 @@ const sidebar = new SidebarController(
       state.prefs.sidebar_width = width;
       persistPrefs();
     },
+  }
+);
+
+const folderView = new FolderView(
+  {
+    containerEl: el.folderView,
+  },
+  {
+    onOpenNote: (relPath) => openNote(relPath),
+    onOpenFolder: (relDir) => openFolderView(relDir),
+    onCreateNote: (folderRel, templateFile) => promptCreateNote(folderRel, templateFile),
+    onCreateFolder: (folderRel) => promptCreateFolder(folderRel),
+    onSaveProperties: (folderRel, properties) =>
+      invoke("save_folder_properties", { folderRel, properties }),
+    onSaveTemplate: async ({ folderRel, fileName, name, description, body }) => {
+      await invoke("save_folder_template", {
+        folderRel,
+        fileName,
+        name,
+        description,
+        body,
+      });
+      await refreshCurrentFolderView();
+      showToast(`Saved template "${name}"`);
+    },
+    onDeleteTemplate: async (folderRel, fileName) => {
+      await invoke("delete_folder_template", { folderRel, fileName });
+      await refreshCurrentFolderView();
+      showToast("Deleted template");
+    },
+    onShowToast: (msg, isError) => showToast(msg, isError),
   }
 );
 
@@ -285,7 +365,11 @@ const editor = new BlockEditor(
   },
   {
     getPages: () => state.vault?.pages || [],
-    onDirty: () => scheduleAutoSave(),
+    onDirty: () => {
+      scheduleAutoSave();
+      scheduleStatusMetricsUpdate();
+      docOutline.scheduleRefresh(180);
+    },
     onOpenLink: (target) => handleOpenLink(target),
     onCreatePage: (name) => createPageFromAutocomplete(name),
     onCollapseChange: (indices) => {
@@ -297,6 +381,7 @@ const editor = new BlockEditor(
         delete state.prefs.collapsed_headings[key];
       }
       syncFoldButton();
+      docOutline.refresh();
       persistPrefs();
     },
     onSavePastedImage: async (dataUrl) => {
@@ -349,7 +434,25 @@ const editor = new BlockEditor(
     onAskAiBlocks: (blocks) => aiPanel.focusOnHighlightedBlocks(blocks),
     onAskAiSelection: (selCtx) => aiPanel.attachSelection(selCtx),
     onCopyBlockLink: (bid) => copyBlockLink(bid),
-    onBlockSelectionChange: (blocks) => aiPanel.syncLiveSelection(blocks),
+    onBlockSelectionChange: (blocks) => {
+      aiPanel.syncLiveSelection(blocks);
+      updateStatusBarMetrics();
+    },
+  }
+);
+
+const docOutline = new DocOutline(
+  {
+    toggleBtn: document.getElementById("btn-toggle-outline"),
+    panelEl: document.getElementById("doc-outline-panel"),
+    scrollEl: el.editorScroll,
+    blocksContainerEl: el.blocksContainer,
+  },
+  {
+    getBlocks: () => editor.getBlocks(),
+    getCollapsedIds: () => editor.collapsedIds,
+    onJumpToBlock: (idx) => editor.scrollToBlockIndex(idx),
+    onToggleHeadingCollapse: (blockId) => editor.toggleHeadingCollapse(blockId),
   }
 );
 
@@ -371,6 +474,10 @@ const aiPanel = new AiPanel(
     clearBtn: document.getElementById("ai-btn-clear"),
     closeBtn: document.getElementById("ai-btn-close"),
     settingsDrawerEl: document.getElementById("ai-settings-drawer"),
+    profilesListEl: document.getElementById("ai-profiles-list"),
+    addProfileBtn: document.getElementById("ai-btn-add-profile"),
+    profileFormEl: document.getElementById("ai-profile-form"),
+    profileNameInput: document.getElementById("ai-profile-name"),
     providerSelect: document.getElementById("ai-provider"),
     apiKeyInput: document.getElementById("ai-api-key"),
     toggleKeyVisBtn: document.getElementById("ai-toggle-key"),
@@ -378,6 +485,7 @@ const aiPanel = new AiPanel(
     modelInput: document.getElementById("ai-model"),
     pickModelBtn: document.getElementById("ai-btn-pick-model"),
     fetchModelsBtn: document.getElementById("ai-btn-fetch-models"),
+    cancelProfileBtn: document.getElementById("ai-cancel-profile"),
     saveSettingsBtn: document.getElementById("ai-save-settings"),
     turnRailEl: document.getElementById("ai-turn-rail"),
     turnPreviewEl: document.getElementById("ai-turn-preview"),
@@ -400,6 +508,9 @@ const aiPanel = new AiPanel(
     }),
     onResizeEnd: (width) => {
       state.prefs.ai_panel_width = width;
+      if (el.graphSideHost) {
+        el.graphSideHost.style.width = `${width}px`;
+      }
       persistPrefs();
     },
     onApplyEdits: async (ops, sourceFile = null) => {
@@ -430,7 +541,7 @@ const aiPanel = new AiPanel(
           updateViewVisibility();
         }
       }
-      if (!state.currentFile || state.rawMode || state.graphMode) {
+      if (!state.currentFile || state.rawMode || isGraphFullscreen()) {
         showToast("Switch to a note in block view to apply edits", true);
         return { ok: false };
       }
@@ -480,6 +591,12 @@ const aiPanel = new AiPanel(
         placeholder: "Conversation title...",
         confirmLabel: "Save",
       }),
+    onBeforeOpen: () => {
+      if (isGraphSide()) {
+        state.graphDisplayMode = "closed";
+        updateViewVisibility();
+      }
+    },
   }
 );
 
@@ -516,6 +633,7 @@ const terminal = new TerminalPanel(
     onCommandFinished: () => {
       if (state.vault) {
         handleRefreshVault();
+        refreshGitBranch();
       }
     },
   }
@@ -524,12 +642,27 @@ const terminal = new TerminalPanel(
 const graphView = new GraphView(
   {
     viewEl: document.getElementById("graph-view"),
+    canvasWrapEl: document.querySelector("#graph-view .graph-canvas-wrap"),
     canvasEl: document.getElementById("graph-canvas"),
     filterInputEl: document.getElementById("graph-filter"),
     localToggleBtn: document.getElementById("graph-local-toggle"),
     orphansToggleBtn: document.getElementById("graph-orphans-toggle"),
+    arrowsToggleBtn: document.getElementById("graph-arrows-toggle"),
+    skillsToggleBtn: document.getElementById("graph-skills-toggle"),
     refreshBtn: document.getElementById("graph-refresh"),
     statsEl: document.getElementById("graph-stats"),
+    sideStatsEl: document.getElementById("graph-side-stats"),
+    sideLocalToggleBtn: document.getElementById("graph-side-local-toggle"),
+    sideFilterToggleBtn: document.getElementById("graph-side-filter-toggle"),
+    sideRefreshBtn: document.getElementById("graph-side-refresh"),
+    expandBtn: document.getElementById("graph-expand-btn"),
+    dockBtn: document.getElementById("graph-dock-btn"),
+    closeBtn: document.getElementById("graph-close-btn"),
+    sideCloseBtn: document.getElementById("graph-side-close-btn"),
+    legendEl: document.getElementById("graph-legend"),
+    inspectorEl: document.getElementById("graph-inspector"),
+    sideFooterEl: document.getElementById("graph-side-footer"),
+    zoomLocateBtn: document.getElementById("graph-zoom-locate"),
     zoomInBtn: document.getElementById("graph-zoom-in"),
     zoomOutBtn: document.getElementById("graph-zoom-out"),
     zoomFitBtn: document.getElementById("graph-zoom-fit"),
@@ -544,6 +677,21 @@ const graphView = new GraphView(
         await handleOpenLink(node.label);
       }
     },
+    onAskAiNode: async (node) => {
+      if (isGraphFullscreen()) {
+        await setGraphDisplayMode("closed");
+      }
+      await aiPanel.askAboutGraphNodes({ primaryNode: node, neighborNodes: [] });
+    },
+    onAskAiCluster: async (node, neighbors) => {
+      if (isGraphFullscreen()) {
+        await setGraphDisplayMode("closed");
+      }
+      await aiPanel.askAboutGraphNodes({ primaryNode: node, neighborNodes: neighbors });
+    },
+    onExpand: () => setGraphDisplayMode("fullscreen"),
+    onDock: () => setGraphDisplayMode("side"),
+    onClose: () => setGraphDisplayMode("closed"),
     onToast: (msg, isErr) => showToast(msg, isErr),
   }
 );
@@ -616,7 +764,7 @@ function showConflictBanner(conflict) {
     }
   }
 
-  el.conflictBanner.hidden = !state.currentFile || state.graphMode;
+  el.conflictBanner.hidden = !state.currentFile || isGraphFullscreen();
 }
 
 function clearConflictBanner() {
@@ -658,9 +806,11 @@ function applyHotReloadFromDisk(disk) {
       }
       syncFoldButton();
     }
+    docOutline.refresh();
   }
 
   renderBacklinks(disk.backlinks || []);
+  updateStatusBarMetrics();
 }
 
 async function resolveConflictReload() {
@@ -851,8 +1001,12 @@ async function drainFsChangedEvents() {
         aiPanel.refreshSkills();
       }
 
-      if (state.graphMode) {
+      if (isGraphOpen()) {
         graphView.loadAndRender(false);
+      }
+
+      if (state.currentFolderView !== null && (hasStructuralChange || batch.changes.length > 0)) {
+        await refreshCurrentFolderView();
       }
 
       if (state.currentFile) {
@@ -949,6 +1103,9 @@ async function flushSave({ force = false } = {}) {
       }
       state.isDirty = false;
       setSaveStatus(force ? "saved" : "saved");
+      if (isGraphOpen()) {
+        graphView.loadAndRender(false);
+      }
     }
     return true;
   } catch (err) {
@@ -970,60 +1127,342 @@ function syncFoldButton() {
   el.btnToggleFold.classList.toggle("active", allCollapsed);
 }
 
+function updateGitBranchUi(branch) {
+  if (!el.statusGitBranch || !el.statusGitBranchName) return;
+  const clean = typeof branch === "string" ? branch.trim() : "";
+  if (!clean) {
+    el.statusGitBranch.hidden = true;
+    el.statusGitBranchName.textContent = "";
+    return;
+  }
+  el.statusGitBranchName.textContent = clean;
+  el.statusGitBranch.title = `Git branch: ${clean} · Click to toggle terminal`;
+  el.statusGitBranch.hidden = false;
+}
+
+async function refreshGitBranch() {
+  if (!state.vault) {
+    updateGitBranchUi(null);
+    return;
+  }
+  try {
+    const branch = await invoke("get_git_branch");
+    if (state.vault) {
+      state.vault.git_branch = branch || null;
+    }
+    updateGitBranchUi(branch);
+  } catch {
+    // Keep existing branch display on transient error
+  }
+}
+
+function getActiveSelectionMetrics() {
+  if (!state.currentFile || isGraphFullscreen()) return null;
+
+  if (state.rawMode) {
+    const ta = el.rawTextarea;
+    if (!ta) return null;
+    const start = ta.selectionStart ?? 0;
+    const end = ta.selectionEnd ?? 0;
+    if (end <= start) return null;
+    const slice = ta.value.slice(start, end);
+    if (!slice.replace(/\u200B/g, "")) return null;
+    return {
+      label: "Selection",
+      ...computeTextMetrics(slice),
+    };
+  }
+
+  const selectedBlocks = editor.getSelectedBlocks();
+  if (selectedBlocks.length > 0) {
+    const m = extractBlocksMetrics(selectedBlocks);
+    return {
+      label: `${selectedBlocks.length} block${selectedBlocks.length === 1 ? "" : "s"}`,
+      ...m,
+    };
+  }
+
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed || sel.rangeCount === 0 || !el.blocksContainer) {
+    return null;
+  }
+  const range = sel.getRangeAt(0);
+  if (!el.blocksContainer.contains(range.commonAncestorContainer)) {
+    return null;
+  }
+  const selText = sel.toString().replace(/\u200B/g, "");
+  if (!selText) return null;
+  return {
+    label: "Selection",
+    ...computeTextMetrics(selText),
+  };
+}
+
+function updateStatusBarMetrics() {
+  if (!el.statusWords || !el.statusChars || !el.statusTokens) return;
+
+  const hasVault = Boolean(state.vault);
+  const showFolder = state.currentFolderView !== null && hasVault && !isGraphFullscreen();
+
+  if (el.statusModeBtn) {
+    if (isGraphFullscreen() && hasVault) {
+      el.statusModeBtn.textContent = "Graph";
+      el.statusModeBtn.title = "Dock Graph to Side Panel";
+      el.statusModeBtn.hidden = false;
+    } else if (showFolder) {
+      el.statusModeBtn.textContent = "Folder";
+      el.statusModeBtn.title = state.currentFolderView
+        ? `Folder Explorer: ${state.currentFolderView}`
+        : "Folder Explorer: Vault Root";
+      el.statusModeBtn.hidden = false;
+    } else if (state.currentFile) {
+      el.statusModeBtn.textContent = state.rawMode ? "Raw Markdown" : "Block Editor";
+      el.statusModeBtn.title = "Toggle Block / Raw Markdown (Ctrl+Shift+M)";
+      el.statusModeBtn.hidden = false;
+    } else {
+      el.statusModeBtn.hidden = true;
+    }
+  }
+
+  if (showFolder) {
+    if (el.statusSelectionBadge) el.statusSelectionBadge.hidden = true;
+    const entries = folderView.overview?.entries || [];
+    let noteCount = 0;
+    let dirCount = 0;
+    for (const item of entries) {
+      if (item.kind === "dir") dirCount++;
+      else if (item.kind === "note") noteCount++;
+    }
+    el.statusWords.textContent = `${noteCount} ${noteCount === 1 ? "note" : "notes"} · ${dirCount} ${dirCount === 1 ? "folder" : "folders"}`;
+    el.statusWords.hidden = false;
+    el.statusChars.hidden = true;
+    el.statusTokens.hidden = true;
+    if (el.statusReadtime) el.statusReadtime.hidden = true;
+    return;
+  }
+
+  if (!state.currentFile || isGraphFullscreen()) {
+    if (el.statusSelectionBadge) el.statusSelectionBadge.hidden = true;
+    el.statusWords.hidden = true;
+    el.statusChars.hidden = true;
+    el.statusTokens.hidden = true;
+    if (el.statusReadtime) el.statusReadtime.hidden = true;
+    return;
+  }
+
+  const tot = state.rawMode
+    ? extractRawMarkdownMetrics(el.rawTextarea?.value || "")
+    : extractBlocksMetrics(editor.getBlocks());
+  const sel = getActiveSelectionMetrics();
+
+  el.statusWords.hidden = false;
+  el.statusChars.hidden = false;
+  el.statusTokens.hidden = false;
+
+  if (sel) {
+    if (el.statusSelectionBadge) {
+      el.statusSelectionBadge.textContent = sel.label;
+      el.statusSelectionBadge.hidden = false;
+    }
+    el.statusWords.textContent = `${sel.words.toLocaleString()} / ${tot.words.toLocaleString()} words`;
+    el.statusChars.textContent = `${sel.chars.toLocaleString()} / ${tot.chars.toLocaleString()} chars`;
+    el.statusTokens.textContent = `~${sel.tokens.toLocaleString()} / ~${tot.tokens.toLocaleString()} tokens`;
+    el.statusTokens.title = `Selected ~${sel.tokens.toLocaleString()} tokens · Full note ~${tot.tokens.toLocaleString()} tokens`;
+  } else {
+    if (el.statusSelectionBadge) el.statusSelectionBadge.hidden = true;
+    el.statusWords.textContent = `${tot.words.toLocaleString()} words`;
+    el.statusChars.textContent = `${tot.chars.toLocaleString()} chars`;
+    el.statusTokens.textContent = `~${tot.tokens.toLocaleString()} tokens`;
+    const blockNote = typeof tot.blockCount === "number" ? ` across ${tot.blockCount} blocks` : "";
+    el.statusTokens.title = `Estimated LLM input tokens (~${tot.tokens.toLocaleString()}${blockNote})`;
+  }
+
+  if (el.statusReadtime) {
+    if (tot.words > 0) {
+      el.statusReadtime.textContent = `${tot.readMins} min read`;
+      el.statusReadtime.hidden = false;
+    } else {
+      el.statusReadtime.hidden = true;
+    }
+  }
+}
+
+function scheduleStatusMetricsUpdate(delayMs = 120) {
+  clearTimeout(state.statusMetricsTimer);
+  state.statusMetricsTimer = setTimeout(() => {
+    state.statusMetricsTimer = null;
+    updateStatusBarMetrics();
+  }, delayMs);
+}
+
+function scheduleStatusSelectionUpdate(delayMs = 60) {
+  clearTimeout(state.statusSelectionTimer);
+  state.statusSelectionTimer = setTimeout(() => {
+    state.statusSelectionTimer = null;
+    updateStatusBarMetrics();
+  }, delayMs);
+}
+
+function renderBreadcrumb(folderRel = "", fileRel = null) {
+  if (!el.breadcrumb) return;
+  if (!state.vault) {
+    el.breadcrumb.textContent = "Skillweaver";
+    return;
+  }
+
+  const rootName = state.vault.root_name || "Vault";
+  const parts = folderRel ? folderRel.split("/").filter(Boolean) : [];
+  const frag = document.createDocumentFragment();
+
+  const addSep = () => {
+    const sep = document.createElement("span");
+    sep.className = "breadcrumb-sep";
+    sep.textContent = "/";
+    frag.appendChild(sep);
+  };
+
+  if (parts.length === 0 && !fileRel) {
+    const rootBtn = document.createElement("button");
+    rootBtn.type = "button";
+    rootBtn.className = "breadcrumb-link breadcrumb-current";
+    rootBtn.textContent = rootName;
+    rootBtn.title = "Open Root Folder Explorer";
+    rootBtn.addEventListener("click", () => openFolderView(""));
+    frag.appendChild(rootBtn);
+  } else {
+    const rootBtn = document.createElement("button");
+    rootBtn.type = "button";
+    rootBtn.className = "breadcrumb-link";
+    rootBtn.textContent = rootName;
+    rootBtn.title = "Open Root Folder Explorer";
+    rootBtn.addEventListener("click", () => openFolderView(""));
+    frag.appendChild(rootBtn);
+  }
+
+  for (let i = 0; i < parts.length; i++) {
+    addSep();
+    const prefix = parts.slice(0, i + 1).join("/");
+    const isLastFolder = i === parts.length - 1 && !fileRel;
+    if (isLastFolder) {
+      const span = document.createElement("span");
+      span.className = "breadcrumb-current";
+      span.textContent = parts[i];
+      frag.appendChild(span);
+    } else {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "breadcrumb-link";
+      btn.textContent = parts[i];
+      btn.title = `Open Folder "${prefix}"`;
+      btn.addEventListener("click", () => openFolderView(prefix));
+      frag.appendChild(btn);
+    }
+  }
+
+  if (fileRel) {
+    addSep();
+    const leaf = fileRel.split("/").pop() || fileRel;
+    const span = document.createElement("span");
+    span.className = "breadcrumb-current";
+    span.textContent = leaf;
+    frag.appendChild(span);
+  }
+
+  el.breadcrumb.innerHTML = "";
+  el.breadcrumb.appendChild(frag);
+}
+
 function updateViewVisibility() {
   const hasVault = Boolean(state.vault);
   const hasFile = Boolean(state.currentFile);
-  const showGraph = state.graphMode && hasVault;
+  const showFullGraph = isGraphFullscreen() && hasVault;
+  const showSideGraph = isGraphSide() && hasVault;
+  const showFolder = state.currentFolderView !== null && hasVault && !showFullGraph;
 
-  el.btnToggleFold.hidden = !hasFile || state.rawMode || showGraph;
+  el.btnToggleFold.hidden = !hasFile || state.rawMode || showFullGraph || showFolder;
   if (!el.btnToggleFold.hidden) {
     syncFoldButton();
   }
-  el.btnToggleRaw.hidden = !hasFile || showGraph;
+  el.btnToggleRaw.hidden = !hasFile || showFullGraph || showFolder;
   el.btnToggleRaw.classList.toggle("active", state.rawMode);
-  el.btnToggleGraph.classList.toggle("active", showGraph);
+  el.btnToggleGraph.classList.toggle("active", showFullGraph || showSideGraph);
 
   const bar = document.getElementById("block-selection-bar");
-  if (!hasFile || state.rawMode || showGraph) {
+  if (!hasFile || state.rawMode || showFullGraph || showFolder) {
     if (bar) bar.hidden = true;
     if (!hasFile) aiPanel.syncLiveSelection([]);
   } else {
     editor.updateBlockSelectionBar();
   }
 
-  if (showGraph) {
+  if (showFullGraph) {
+    if (el.graphResizer) el.graphResizer.hidden = true;
+    if (el.graphSideHost) el.graphSideHost.hidden = true;
+    if (el.appEl && el.graphView.parentElement !== el.appEl) {
+      el.appEl.appendChild(el.graphView);
+    }
+    el.graphView.hidden = false;
+    graphView.setDisplayMode("fullscreen");
+    graphView.setVisible(true);
+  } else if (showSideGraph) {
+    if (aiPanel.isOpen()) {
+      aiPanel.close();
+    }
+    if (el.graphSideHost && el.graphView.parentElement !== el.graphSideHost) {
+      el.graphSideHost.appendChild(el.graphView);
+    }
+    if (el.graphResizer) el.graphResizer.hidden = false;
+    if (el.graphSideHost) el.graphSideHost.hidden = false;
+    el.graphView.hidden = false;
+    graphView.setDisplayMode("side");
+    graphView.setVisible(true);
+  } else {
+    if (el.graphResizer) el.graphResizer.hidden = true;
+    if (el.graphSideHost) el.graphSideHost.hidden = true;
+    el.graphView.hidden = true;
+    graphView.setVisible(false);
+  }
+
+  if (showFolder) {
     el.conflictBanner.hidden = true;
     el.welcomeView.hidden = true;
-    el.editorScroll.hidden = true;
+    el.folderView.hidden = false;
+    el.editorStage.hidden = true;
     el.rawEditorView.hidden = true;
-    el.graphView.hidden = false;
-    el.breadcrumb.textContent = `${state.vault.root_name} / Graph View`;
-    graphView.setVisible(true);
+    docOutline.setVisible(false);
+    renderBreadcrumb(state.currentFolderView, null);
+    setSaveStatus("saved");
+    updateStatusBarMetrics();
     return;
   }
 
-  el.graphView.hidden = true;
-  graphView.setVisible(false);
+  el.folderView.hidden = true;
 
   if (!hasFile) {
     el.conflictBanner.hidden = true;
     el.welcomeView.hidden = false;
-    el.editorScroll.hidden = true;
+    el.editorStage.hidden = true;
     el.rawEditorView.hidden = true;
+    docOutline.setVisible(false);
     el.btnWelcomeNew.hidden = !hasVault;
     el.welcomeSubtitle.innerHTML = hasVault
       ? `Folder <strong>${escapeHtml(state.vault.root_name)}</strong> is open. Select a <code>.md</code> file or create a new note.`
       : `Lightweight block-based editor over plain <code>.md</code> folders.`;
-    el.breadcrumb.textContent = hasVault ? state.vault.root_name : "Skillweaver";
+    renderBreadcrumb("", null);
     setSaveStatus("saved");
+    updateStatusBarMetrics();
     return;
   }
 
-  el.conflictBanner.hidden = !state.externalConflict;
+  el.conflictBanner.hidden = !state.externalConflict || showFullGraph;
   el.welcomeView.hidden = true;
-  el.editorScroll.hidden = state.rawMode;
+  el.editorStage.hidden = state.rawMode;
   el.rawEditorView.hidden = !state.rawMode;
-  el.breadcrumb.textContent = `${state.vault?.root_name || ""} / ${state.currentFile}`;
+  docOutline.setVisible(!state.rawMode && !showFullGraph);
+  const slashIdx = state.currentFile.lastIndexOf("/");
+  const noteFolder = slashIdx === -1 ? "" : state.currentFile.slice(0, slashIdx);
+  renderBreadcrumb(noteFolder, state.currentFile);
+  updateStatusBarMetrics();
 }
 
 function renderBacklinks(backlinks = []) {
@@ -1053,13 +1492,115 @@ function renderBacklinks(backlinks = []) {
   });
 }
 
-async function applyVaultSnapshot(snapshot, openInitial = true) {
+async function loadBacklinksAsync(relPath) {
+  const seq = ++state.backlinksRequestSeq;
+  try {
+    const backlinks = await invoke("get_backlinks", { relPath });
+    if (seq !== state.backlinksRequestSeq || state.currentFile !== relPath) {
+      return;
+    }
+    renderBacklinks(backlinks || []);
+  } catch {
+    if (seq === state.backlinksRequestSeq && state.currentFile === relPath) {
+      renderBacklinks([]);
+    }
+  }
+}
+
+function applyOpenedNotePayload(payload) {
+  clearConflictBanner();
+  state.currentFolderView = null;
+  state.currentFile = payload.rel_path;
+  state.prefs.last_file = payload.rel_path;
+  if (isGraphFullscreen()) {
+    state.graphDisplayMode = "side";
+  }
+  state.isDirty = false;
+  state.lastKnownDiskHash = payload.disk_hash || null;
+  state.lastKnownMtimeMs = payload.mtime_ms ?? null;
+  state.lastKnownDiskMd = payload.raw_md ?? "";
+
+  el.docTitle.textContent = payload.title;
+  el.docPathHint.textContent = payload.rel_path;
+  el.rawTextarea.value = payload.raw_md;
+
+  const collapsedIndices = state.prefs.collapsed_headings[foldKey(payload.rel_path)] || [];
+  editor.loadDocument(payload.blocks, collapsedIndices);
+  renderBacklinks(payload.backlinks || []);
+  sidebar.setActiveFile(payload.rel_path);
+  setSaveStatus("saved");
+  updateViewVisibility();
+  loadBacklinksAsync(payload.rel_path);
+  if (isGraphOpen()) {
+    graphView.handleActiveFileChanged(payload.rel_path);
+  }
+}
+
+async function refreshCurrentFolderView() {
+  if (!state.vault || state.currentFolderView === null) return;
+  try {
+    const overview = await invoke("get_folder_overview", {
+      folderRel: state.currentFolderView,
+    });
+    if (state.currentFolderView === null) return;
+    folderView.setOverview(overview);
+    updateStatusBarMetrics();
+  } catch {
+    state.currentFolderView = null;
+    sidebar.setActiveFolder(null);
+    updateViewVisibility();
+  }
+}
+
+async function openFolderView(folderRel = "") {
+  if (!state.vault) return;
+  if (state.currentFile) {
+    if (state.externalConflict) {
+      showToast("Resolve the disk conflict before switching folders", true);
+      return;
+    }
+    const saved = await flushSave();
+    if (!saved) return;
+  }
+
+  const normalized = String(folderRel ?? "")
+    .replace(/\\/g, "/")
+    .replace(/^\/+|\/+$/g, "");
+
+  try {
+    const overview = await invoke("get_folder_overview", { folderRel: normalized });
+    clearConflictBanner();
+    state.currentFile = null;
+    if (isGraphFullscreen()) {
+      state.graphDisplayMode = "side";
+    }
+    state.isDirty = false;
+    state.lastKnownDiskHash = null;
+    state.lastKnownMtimeMs = null;
+    state.lastKnownDiskMd = null;
+    state.currentFolderView = overview.folder_rel;
+
+    folderView.setOverview(overview);
+    sidebar.setActiveFolder(overview.folder_rel);
+    updateViewVisibility();
+    if (isGraphOpen()) {
+      graphView.handleActiveFileChanged(null);
+    }
+  } catch (err) {
+    showToast(`Failed to open folder view: ${err}`, true);
+  }
+}
+
+async function applyVaultSnapshot(snapshot, openInitial = true, preloadedInitialNote = null) {
   state.vault = snapshot;
   if (!snapshot) {
     state.currentFile = null;
+    state.currentFolderView = null;
     state.prefs.last_folder = null;
     el.vaultName.textContent = "No Folder";
     sidebar.setTree([], null);
+    sidebar.setActiveFolder(null);
+    updateGitBranchUi(null);
     updateViewVisibility();
     return;
   }
@@ -1067,11 +1608,22 @@ async function applyVaultSnapshot(snapshot, openInitial = true) {
   state.prefs.last_folder = snapshot.root_path;
   el.vaultName.textContent = snapshot.root_name;
   el.vaultName.parentElement.title = snapshot.root_path;
+  updateGitBranchUi(snapshot.git_branch || null);
   sidebar.setTree(snapshot.tree, state.currentFile);
 
   if (openInitial && snapshot.initial_file) {
-    await openNote(snapshot.initial_file);
-  } else if (!state.currentFile || state.graphMode) {
+    if (
+      preloadedInitialNote &&
+      preloadedInitialNote.rel_path === snapshot.initial_file
+    ) {
+      applyOpenedNotePayload(preloadedInitialNote);
+    } else {
+      await openNote(snapshot.initial_file);
+    }
+  } else if (state.currentFolderView !== null && !state.currentFile && !isGraphFullscreen()) {
+    await refreshCurrentFolderView();
+    updateViewVisibility();
+  } else if (!state.currentFile || isGraphOpen()) {
     updateViewVisibility();
   } else {
     editor.refreshLinkStyles();
@@ -1080,8 +1632,11 @@ async function applyVaultSnapshot(snapshot, openInitial = true) {
   if (openInitial && snapshot.root_path) {
     terminal.syncCwd(snapshot.root_path);
   }
-  aiPanel.refreshSkills();
-  aiPanel.refreshHistoryView();
+
+  if (aiPanel.isOpen() || aiPanel.prefsLoaded) {
+    aiPanel.refreshSkills();
+    aiPanel.refreshHistoryView();
+  }
 }
 
 async function openNote(relPath) {
@@ -1101,26 +1656,7 @@ async function openNote(relPath) {
 
   try {
     const payload = await invoke("open_note", { relPath });
-    clearConflictBanner();
-    state.currentFile = payload.rel_path;
-    state.prefs.last_file = payload.rel_path;
-    state.graphMode = false;
-    state.isDirty = false;
-    state.lastKnownDiskHash = payload.disk_hash || null;
-    state.lastKnownMtimeMs = payload.mtime_ms ?? null;
-    state.lastKnownDiskMd = payload.raw_md ?? "";
-
-    el.docTitle.textContent = payload.title;
-    el.docPathHint.textContent = payload.rel_path;
-    el.breadcrumb.textContent = `${state.vault?.root_name || ""} / ${payload.rel_path}`;
-    el.rawTextarea.value = payload.raw_md;
-
-    const collapsedIndices = state.prefs.collapsed_headings[foldKey(payload.rel_path)] || [];
-    editor.loadDocument(payload.blocks, collapsedIndices);
-    renderBacklinks(payload.backlinks);
-    sidebar.setActiveFile(payload.rel_path);
-    setSaveStatus("saved");
-    updateViewVisibility();
+    applyOpenedNotePayload(payload);
   } catch (err) {
     showToast(`Failed to open note: ${err}`, true);
   }
@@ -1139,11 +1675,14 @@ async function handleOpenFolder() {
       clearConflictBanner();
       imageCache.clear();
       state.currentFile = null;
+      state.currentFolderView = null;
+      sidebar.setActiveFolder(null);
       state.lastKnownDiskHash = null;
       state.lastKnownMtimeMs = null;
       state.lastKnownDiskMd = null;
       state.rawMode = false;
-      state.graphMode = false;
+      state.graphDisplayMode = "closed";
+      graphView.clearData();
       state.prefs.last_folder = snapshot.root_path;
       state.prefs.last_file = snapshot.initial_file || null;
       await applyVaultSnapshot(snapshot, true);
@@ -1166,7 +1705,7 @@ async function handleRefreshVault() {
   }
 }
 
-async function promptCreateNote(folderRel = "") {
+async function promptCreateNote(folderRel = "", templateFileName = null) {
   if (!state.vault) {
     showToast("Open a folder first", true);
     return;
@@ -1176,9 +1715,12 @@ async function promptCreateNote(folderRel = "") {
     return;
   }
   const prefix = folderRel ? `${folderRel}/` : "";
+  const tplLabel = templateFileName
+    ? ` using template "${templateFileName.replace(/\.md$/i, "")}"`
+    : "";
   const input = await modal.prompt({
     title: "New Markdown Note",
-    description: folderRel ? `Create inside "${folderRel}"` : "Create in folder root",
+    description: `${folderRel ? `Create inside "${folderRel}"` : "Create in folder root"}${tplLabel}`,
     defaultValue: "",
     placeholder: "e.g. meeting-notes",
     confirmLabel: "Create",
@@ -1191,7 +1733,15 @@ async function promptCreateNote(folderRel = "") {
   try {
     const saved = await flushSave();
     if (!saved) return;
-    const res = await invoke("create_note", { relPath });
+    const res =
+      !clean.includes("/")
+        ? await invoke("create_note_from_template", {
+            folderRel: folderRel || "",
+            noteName: clean,
+            templateFileName: templateFileName || null,
+          })
+        : await invoke("create_note", { relPath });
+    state.currentFolderView = null;
     await applyVaultSnapshot(res.vault, false);
     await openNote(res.rel_path);
     editor.focusBottomOrCreate();
@@ -1234,6 +1784,9 @@ async function promptCreateFolder(parentRel = "") {
   try {
     const snap = await invoke("create_folder", { relPath });
     await applyVaultSnapshot(snap, false);
+    if (state.currentFolderView !== null) {
+      await refreshCurrentFolderView();
+    }
   } catch (err) {
     showToast(`Could not create folder: ${err}`, true);
   }
@@ -1245,14 +1798,26 @@ async function promptRenameEntry(node) {
     return;
   }
   const isDir = node.is_dir;
-  const currentName = isDir ? node.rel_path : node.rel_path.replace(/\.md$/i, "");
+  const normalizedRel = node.rel_path.replace(/\\/g, "/");
+  const lastSlash = normalizedRel.lastIndexOf("/");
+  const parentDir = lastSlash >= 0 ? normalizedRel.slice(0, lastSlash) : "";
+  const baseSegment = lastSlash >= 0 ? normalizedRel.slice(lastSlash + 1) : normalizedRel;
+  const currentName = isDir ? baseSegment : baseSegment.replace(/\.md$/i, "");
   const input = await modal.prompt({
     title: isDir ? "Rename Folder" : "Rename Note",
     description: "Links across other markdown files update automatically.",
     defaultValue: currentName,
     confirmLabel: "Rename",
   });
-  if (!input || !input.trim() || input.trim() === currentName) return;
+  const trimmed = (input || "").trim();
+  if (!trimmed) return;
+  const nextName = isDir ? trimmed : trimmed.replace(/\.md$/i, "").trim();
+  if (!nextName || nextName === currentName) return;
+  if (/[\\/]/.test(nextName)) {
+    showToast("Name cannot contain / or \\ — drag in the sidebar to move between folders", true);
+    return;
+  }
+  const newRel = parentDir ? `${parentDir}/${nextName}` : nextName;
 
   try {
     const saved = await flushSave();
@@ -1260,7 +1825,7 @@ async function promptRenameEntry(node) {
     const oldFoldKey = foldKey(node.rel_path);
     const res = await invoke("rename_entry", {
       oldRel: node.rel_path,
-      newRel: input.trim(),
+      newRel,
     });
 
     if (state.prefs.collapsed_headings[oldFoldKey]) {
@@ -1270,10 +1835,26 @@ async function promptRenameEntry(node) {
       persistPrefs();
     }
 
+    if (isDir && state.currentFolderView !== null) {
+      if (state.currentFolderView === normalizedRel) {
+        state.currentFolderView = res.new_rel;
+      } else if (state.currentFolderView.startsWith(`${normalizedRel}/`)) {
+        state.currentFolderView = `${res.new_rel}${state.currentFolderView.slice(normalizedRel.length)}`;
+      }
+      sidebar.setActiveFolder(state.currentFolderView);
+    }
+
     const wasCurrent = state.currentFile === node.rel_path;
+    const childPrefix = isDir ? `${normalizedRel}/` : null;
+    const renamedActiveChild =
+      childPrefix && state.currentFile && state.currentFile.startsWith(childPrefix)
+        ? `${res.new_rel}${state.currentFile.slice(normalizedRel.length)}`
+        : null;
     await applyVaultSnapshot(res.vault, false);
     if (wasCurrent) {
       await openNote(res.new_rel);
+    } else if (renamedActiveChild) {
+      await openNote(renamedActiveChild);
     } else if (state.currentFile) {
       await openNote(state.currentFile);
     }
@@ -1324,6 +1905,15 @@ async function handleMoveEntry(node, targetFolder) {
     }
     if (prefsChanged) persistPrefs();
 
+    if (node.is_dir && state.currentFolderView !== null) {
+      if (state.currentFolderView === node.rel_path) {
+        state.currentFolderView = res.new_rel;
+      } else if (state.currentFolderView.startsWith(`${node.rel_path}/`)) {
+        state.currentFolderView = `${res.new_rel}/${state.currentFolderView.slice(node.rel_path.length + 1)}`;
+      }
+      sidebar.setActiveFolder(state.currentFolderView);
+    }
+
     let nextCurrent = state.currentFile;
     if (state.currentFile === node.rel_path) {
       nextCurrent = res.new_rel;
@@ -1364,6 +1954,17 @@ async function promptDeleteEntry(node) {
       state.lastKnownMtimeMs = null;
       state.lastKnownDiskMd = null;
     }
+
+    if (
+      node.is_dir &&
+      state.currentFolderView !== null &&
+      (state.currentFolderView === node.rel_path ||
+        state.currentFolderView.startsWith(`${node.rel_path}/`))
+    ) {
+      state.currentFolderView = null;
+      sidebar.setActiveFolder(null);
+    }
+
     await applyVaultSnapshot(snap, false);
     updateViewVisibility();
   } catch (err) {
@@ -1462,12 +2063,46 @@ function toggleSidebar() {
   persistPrefs();
 }
 
-async function toggleGraphMode() {
-  if (!state.vault) {
+function initGraphResizer() {
+  if (!el.graphResizer || !el.graphSideHost) return;
+  let dragging = false;
+  let startX = 0;
+  let startWidth = 340;
+
+  el.graphResizer.addEventListener("mousedown", (e) => {
+    if (!isGraphSide()) return;
+    dragging = true;
+    startX = e.clientX;
+    startWidth = el.graphSideHost.getBoundingClientRect().width;
+    el.graphResizer.classList.add("dragging");
+    document.body.style.cursor = "col-resize";
+    e.preventDefault();
+  });
+
+  window.addEventListener("mousemove", (e) => {
+    if (!dragging) return;
+    const next = Math.min(560, Math.max(260, Math.round(startWidth - (e.clientX - startX))));
+    el.graphSideHost.style.width = `${next}px`;
+  });
+
+  window.addEventListener("mouseup", () => {
+    if (!dragging) return;
+    dragging = false;
+    el.graphResizer.classList.remove("dragging");
+    document.body.style.cursor = "";
+    const width = Math.round(el.graphSideHost.getBoundingClientRect().width);
+    setRightDrawerWidth(width);
+    state.prefs.ai_panel_width = width;
+    persistPrefs();
+  });
+}
+
+async function setGraphDisplayMode(mode) {
+  if (!state.vault && mode !== "closed") {
     showToast("Open a folder first", false);
     return;
   }
-  if (!state.graphMode) {
+  if (mode !== "closed" && !isGraphOpen()) {
     if (state.externalConflict) {
       showToast("Resolve the disk conflict first", true);
       return;
@@ -1475,9 +2110,26 @@ async function toggleGraphMode() {
     const saved = await flushSave();
     if (!saved) return;
   }
-  state.graphMode = !state.graphMode;
+  if (mode === "side" && aiPanel.isOpen()) {
+    aiPanel.close();
+  }
+  state.graphDisplayMode = mode;
   updateViewVisibility();
 }
+
+async function toggleGraphMode() {
+  if (!state.vault) {
+    showToast("Open a folder first", false);
+    return;
+  }
+  if (isGraphOpen()) {
+    await setGraphDisplayMode("closed");
+  } else {
+    await setGraphDisplayMode("side");
+  }
+}
+
+initGraphResizer();
 
 /* Wire UI Controls */
 el.btnConflictDiff.addEventListener("click", openConflictDiff);
@@ -1524,6 +2176,25 @@ el.backlinksToggle.addEventListener("click", () => {
 
 el.rawTextarea.addEventListener("input", () => {
   scheduleAutoSave();
+  scheduleStatusMetricsUpdate();
+});
+el.rawTextarea.addEventListener("select", () => scheduleStatusSelectionUpdate(40));
+el.rawTextarea.addEventListener("keyup", () => scheduleStatusSelectionUpdate(60));
+el.rawTextarea.addEventListener("mouseup", () => scheduleStatusSelectionUpdate(60));
+
+el.statusGitBranch?.addEventListener("click", () => terminal.toggle());
+el.statusModeBtn?.addEventListener("click", () => {
+  if (isGraphFullscreen()) {
+    setGraphDisplayMode("side");
+  } else if (state.currentFile) {
+    toggleRawMode();
+  }
+});
+
+document.addEventListener("selectionchange", () => {
+  if (state.currentFile && !state.rawMode && !isGraphFullscreen()) {
+    scheduleStatusSelectionUpdate(60);
+  }
 });
 
 /* Window Zoom Shortcuts (VS Code-style, capture phase so they work everywhere) */
@@ -1578,12 +2249,13 @@ document.addEventListener("keydown", (e) => {
     return;
   }
 
-  if (e.key === "Escape" && state.graphMode && !quickSwitcher.isOpen()) {
+  if (e.key === "Escape" && isGraphFullscreen() && !quickSwitcher.isOpen()) {
     const modalEl = document.getElementById("input-modal");
     if (!modalEl || modalEl.hidden) {
       e.preventDefault();
-      state.graphMode = false;
-      updateViewVisibility();
+      if (!graphView.handleEscape()) {
+        setGraphDisplayMode("side");
+      }
       return;
     }
   }
@@ -1597,7 +2269,7 @@ document.addEventListener("keydown", (e) => {
 
   if (
     !state.rawMode &&
-    !state.graphMode &&
+    !isGraphFullscreen() &&
     state.currentFile &&
     modalHidden &&
     !quickSwitcher.isOpen() &&
@@ -1641,12 +2313,19 @@ document.addEventListener("keydown", (e) => {
   if (e.code === "Backquote" || e.key === "`" || e.key === "~") {
     e.preventDefault();
     terminal.toggle();
+  } else if (key === "g" && e.shiftKey) {
+    e.preventDefault();
+    if (!state.vault) {
+      showToast("Open a folder first", false);
+      return;
+    }
+    setGraphDisplayMode(isGraphFullscreen() ? "closed" : "fullscreen");
   } else if (key === "g" && !e.shiftKey) {
     e.preventDefault();
     toggleGraphMode();
   } else if (key === "j" && !e.shiftKey) {
     e.preventDefault();
-    if (editor.hasBlockSelection() && !state.rawMode && !state.graphMode) {
+    if (editor.hasBlockSelection() && !state.rawMode && !isGraphFullscreen()) {
       aiPanel.focusOnHighlightedBlocks(editor.getSelectedBlocksForAi());
       return;
     }
@@ -1664,7 +2343,7 @@ document.addEventListener("keydown", (e) => {
   } else if (key === "a" && e.shiftKey) {
     e.preventDefault();
     aiPanel.toggle();
-  } else if (key === "h" && e.shiftKey && !state.rawMode && !state.graphMode && state.currentFile) {
+  } else if (key === "h" && e.shiftKey && !state.rawMode && !isGraphFullscreen() && state.currentFile) {
     if (editor.applyLastUsedColor()) {
       e.preventDefault();
     }
@@ -1678,6 +2357,11 @@ document.addEventListener("keydown", (e) => {
     if (focused) {
       e.preventDefault();
       editor.duplicateBlock(focused.idx);
+    }
+  } else if (key === "o" && e.shiftKey) {
+    e.preventDefault();
+    if (state.currentFile && !state.rawMode && !isGraphFullscreen()) {
+      docOutline.toggle();
     }
   } else if (key === "o" && !e.shiftKey) {
     e.preventDefault();
@@ -1738,9 +2422,18 @@ async function init() {
     enqueueFsChangedEvent(event?.payload);
   });
 
+  tauriListen("terminal-prompt", () => {
+    if (state.vault) {
+      refreshGitBranch();
+    }
+  });
+
   window.addEventListener("focus", () => {
     if (state.vault && state.currentFile && !state.fsEventQueueRunning) {
       checkActiveNoteExternalChange();
+    }
+    if (state.vault) {
+      refreshGitBranch();
     }
   });
 
@@ -1756,8 +2449,8 @@ async function init() {
     sidebar.setWidth(state.prefs.sidebar_width);
     sidebar.setCollapsed(state.prefs.sidebar_collapsed);
     terminal.setHeight(state.prefs.terminal_height);
-    aiPanel.setWidth(state.prefs.ai_panel_width);
-    await applyVaultSnapshot(startup.vault, true);
+    setRightDrawerWidth(state.prefs.ai_panel_width);
+    await applyVaultSnapshot(startup.vault, true, startup.initial_note || null);
   } catch (err) {
     showToast(`Startup failed: ${err}`, true);
     updateViewVisibility();

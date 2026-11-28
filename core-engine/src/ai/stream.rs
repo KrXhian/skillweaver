@@ -655,6 +655,7 @@ mod tests {
             api_key: "sk-openai".into(),
             base_url: "https://api.openai.com/v1/chat/completions".into(),
             model: "gpt-4o-mini".into(),
+            ..AiPrefs::default()
         };
         let built_oa = build_provider_http_request(&openai_prefs, &req).unwrap();
         assert_eq!(built_oa.url, "https://api.openai.com/v1/chat/completions");
@@ -673,6 +674,7 @@ mod tests {
             api_key: "AIzaTest".into(),
             base_url: "https://generativelanguage.googleapis.com/v1beta".into(),
             model: "gemini-2.5-flash".into(),
+            ..AiPrefs::default()
         };
         let built_gem = build_provider_http_request(&gem_prefs, &req).unwrap();
         assert_eq!(
@@ -705,6 +707,7 @@ mod tests {
             api_key: "sk-ant-1".into(),
             base_url: "https://api.anthropic.com/v1/messages".into(),
             model: "claude-3-5-sonnet-latest".into(),
+            ..AiPrefs::default()
         };
         let built_ant = build_provider_http_request(&ant_prefs, &req).unwrap();
         assert!(built_ant
@@ -754,6 +757,7 @@ mod tests {
             api_key: "sk-ant".into(),
             base_url: "".into(),
             model: "claude-sonnet-4-5".into(),
+            ..AiPrefs::default()
         };
         let built_ant = build_provider_http_request(&ant_modern, &req).unwrap();
         let ant_json: Value = serde_json::from_str(&built_ant.body_json).unwrap();
@@ -788,6 +792,7 @@ mod tests {
             api_key: "AIzaTest".into(),
             base_url: "".into(),
             model: "gemini-2.5-flash".into(),
+            ..AiPrefs::default()
         };
         let built_gem = build_provider_http_request(&gem_prefs, &req).unwrap();
         let gem_json: Value = serde_json::from_str(&built_gem.body_json).unwrap();
@@ -810,6 +815,7 @@ mod tests {
             api_key: "sk-oa".into(),
             base_url: "".into(),
             model: "gpt-4o-mini".into(),
+            ..AiPrefs::default()
         };
         let built_oa = build_provider_http_request(&oa_prefs, &req).unwrap();
         let oa_json: Value = serde_json::from_str(&built_oa.body_json).unwrap();
