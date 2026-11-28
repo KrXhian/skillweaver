@@ -18,6 +18,7 @@ pub mod ai;
 pub mod base64;
 mod commands;
 pub mod error;
+pub mod folder;
 pub mod fs_util;
 pub mod markdown;
 pub mod mcp;
@@ -27,7 +28,6 @@ pub mod vault;
 pub mod watcher;
 
 use commands::AppState;
-use std::sync::Mutex;
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -35,16 +35,25 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             let saved = prefs::load_prefs();
-            if saved.zoom_percent != prefs::ZOOM_DEFAULT_PERCENT {
-                if let Some(win) = app.get_webview_window("main") {
+            if let Some(win) = app.get_webview_window("main") {
+                let bg = if saved.theme.eq_ignore_ascii_case("light") {
+                    tauri::window::Color(255, 255, 255, 255)
+                } else {
+                    tauri::window::Color(25, 25, 25, 255)
+                };
+                let _ = win.set_background_color(Some(bg));
+                if saved.zoom_percent != prefs::ZOOM_DEFAULT_PERCENT {
                     let _ = win.set_zoom((saved.zoom_percent as f64) / 100.0);
                 }
             }
+
+            let prewarm_handle = std::thread::spawn(commands::prepare_startup_data);
+            if let Ok(mut guard) = app.state::<AppState>().prewarm_handle.lock() {
+                *guard = Some(prewarm_handle);
+            }
             Ok(())
         })
-        .manage(AppState {
-            vault_root: Mutex::new(None),
-        })
+        .manage(AppState::default())
         .manage(terminal::TerminalState::default())
         .manage(ai::AiState::default())
         .manage(watcher::VaultWatcherState::default())
@@ -90,6 +99,13 @@ pub fn run() {
             commands::search_vault,
             commands::resolve_block_reference,
             commands::get_vault_graph,
+            commands::get_git_branch,
+            commands::get_backlinks,
+            commands::get_folder_overview,
+            commands::save_folder_properties,
+            commands::save_folder_template,
+            commands::delete_folder_template,
+            commands::create_note_from_template,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Skillweaver");
