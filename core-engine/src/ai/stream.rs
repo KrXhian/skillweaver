@@ -14,28 +14,14 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::fs;
-use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread;
+use std::time::Duration;
+use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter};
 
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
-
-use super::http::{
-    build_curl_config_stdin, curl_binary, extract_http_error_message, status_write_out_arg,
-    HTTP_STATUS_MARKER,
-};
+use super::http::{apply_headers, build_http_client, extract_http_error_message};
 use super::prefs::{load_ai_prefs, AiPrefs};
-use crate::fs_util::kill_process_tree;
-#[cfg(windows)]
-use crate::fs_util::CREATE_NO_WINDOW;
-
-static REQ_TMP_SEQ: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AiChatMessage {
@@ -61,19 +47,22 @@ pub struct AiStreamEvent {
     pub finish_reason: Option<String>,
 }
 
-/// Holds the PID of any currently streaming `curl` process so it can be cancelled cleanly.
+struct ActiveStream {
+    id: u64,
+    handle: JoinHandle<()>,
+    cancelled: Arc<AtomicBool>,
+}
+
+/// Holds the active streaming task handle so an in-flight AI request can be cancelled cleanly.
 #[derive(Default)]
 pub struct AiState {
-    active_pid: Arc<Mutex<Option<u32>>>,
+    active: Arc<Mutex<Option<ActiveStream>>>,
+    next_id: AtomicU64,
 }
 
 impl Drop for AiState {
     fn drop(&mut self) {
-        if let Ok(mut guard) = self.active_pid.lock() {
-            if let Some(pid) = guard.take() {
-                kill_process_tree(pid);
-            }
-        }
+        cancel_stream(self);
     }
 }
 
@@ -369,23 +358,15 @@ pub fn parse_sse_finish_reason(provider: &str, data_line: &str) -> Option<String
     }
 }
 
-struct TempFileGuard(PathBuf);
-
-impl Drop for TempFileGuard {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
-    }
+struct StreamClearGuard {
+    active: Arc<Mutex<Option<ActiveStream>>>,
+    id: u64,
 }
 
-struct PidClearGuard {
-    active_pid: Arc<Mutex<Option<u32>>>,
-    pid: u32,
-}
-
-impl Drop for PidClearGuard {
+impl Drop for StreamClearGuard {
     fn drop(&mut self) {
-        if let Ok(mut guard) = self.active_pid.lock() {
-            if *guard == Some(self.pid) {
+        if let Ok(mut guard) = self.active.lock() {
+            if guard.as_ref().is_some_and(|stream| stream.id == self.id) {
                 *guard = None;
             }
         }
@@ -395,12 +376,13 @@ impl Drop for PidClearGuard {
 struct StreamCompletionGuard {
     app: AppHandle,
     request_id: String,
+    cancelled: Arc<AtomicBool>,
     finished: bool,
 }
 
 impl Drop for StreamCompletionGuard {
     fn drop(&mut self) {
-        if !self.finished {
+        if !self.finished && !self.cancelled.load(Ordering::SeqCst) {
             let _ = self.app.emit(
                 "ai-stream",
                 AiStreamEvent {
@@ -414,7 +396,71 @@ impl Drop for StreamCompletionGuard {
     }
 }
 
-/// Starts a background streaming chat request using `curl.exe` with secrets passed via stdin.
+fn drain_sse_lines(pending: &mut Vec<u8>, chunk: &[u8]) -> Vec<String> {
+    pending.extend_from_slice(chunk);
+    let mut lines = Vec::new();
+    let mut start = 0usize;
+    while let Some(rel_pos) = pending[start..].iter().position(|&b| b == b'\n') {
+        let end = start + rel_pos;
+        let line_bytes = &pending[start..end];
+        let trimmed_bytes = line_bytes.strip_suffix(b"\r").unwrap_or(line_bytes);
+        lines.push(String::from_utf8_lossy(trimmed_bytes).into_owned());
+        start = end + 1;
+    }
+    if start > 0 {
+        pending.drain(..start);
+    }
+    lines
+}
+
+fn flush_sse_remainder(pending: &mut Vec<u8>) -> Option<String> {
+    if pending.is_empty() {
+        return None;
+    }
+    let raw = std::mem::take(pending);
+    let trimmed_bytes = raw.strip_suffix(b"\n").unwrap_or(&raw);
+    let trimmed_bytes = trimmed_bytes.strip_suffix(b"\r").unwrap_or(trimmed_bytes);
+    Some(String::from_utf8_lossy(trimmed_bytes).into_owned())
+}
+
+fn process_sse_line(
+    line: &str,
+    provider: &str,
+    request_id: &str,
+    app: &AppHandle,
+    emitted_any_delta: &mut bool,
+    finish_reason: &mut Option<String>,
+    raw_non_sse: &mut String,
+) {
+    if let Some(data_raw) = line.strip_prefix("data:") {
+        let data = data_raw.trim();
+        if data.is_empty() || data == "[DONE]" {
+            return;
+        }
+        if let Some(reason) = parse_sse_finish_reason(provider, data) {
+            *finish_reason = Some(reason);
+        }
+        if let Some(delta) = parse_sse_delta(provider, data) {
+            *emitted_any_delta = true;
+            let _ = app.emit(
+                "ai-stream",
+                AiStreamEvent {
+                    request_id: request_id.to_string(),
+                    kind: "delta".to_string(),
+                    text: delta,
+                    finish_reason: None,
+                },
+            );
+        }
+    } else if !line.trim().is_empty() && raw_non_sse.len() < 16384 {
+        if !raw_non_sse.is_empty() {
+            raw_non_sse.push('\n');
+        }
+        raw_non_sse.push_str(line);
+    }
+}
+
+/// Starts a background streaming chat request using native Rust HTTP/TLS (`reqwest`).
 pub fn start_chat_stream(
     app: AppHandle,
     ai_state: &AiState,
@@ -427,169 +473,118 @@ pub fn start_chat_stream(
     let provider = prefs.provider.clone();
     let request_id = req.request_id.clone();
 
-    let seq = REQ_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp_path = std::env::temp_dir().join(format!(
-        "skillweaver_ai_{}_{}.json",
-        std::process::id(),
-        seq
-    ));
-    fs::write(&tmp_path, http_req.body_json.as_bytes())
-        .map_err(|e| format!("Failed to stage AI request body: {e}"))?;
-    let tmp_guard = TempFileGuard(tmp_path);
+    let client = build_http_client(Duration::from_secs(20), Duration::from_secs(180))?;
+    let req_builder =
+        apply_headers(client.post(&http_req.url), &http_req.headers)?.body(http_req.body_json);
 
-    let config_stdin = build_curl_config_stdin(&http_req.url, &http_req.headers);
+    let stream_id = ai_state.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancelled_task = Arc::clone(&cancelled);
+    let active_for_guard = Arc::clone(&ai_state.active);
 
-    let curl_bin = curl_binary();
-    let write_out = status_write_out_arg();
-    let mut cmd = Command::new(curl_bin);
-    cmd.args([
-        "-sS",
-        "-N",
-        "--connect-timeout",
-        "20",
-        "--max-time",
-        "180",
-        "-K",
-        "-",
-        "--data-binary",
-    ])
-    .arg(format!("@{}", tmp_guard.0.display()))
-    .args(["-w", &write_out])
-    .stdin(Stdio::piped())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped());
+    let mut guard = ai_state
+        .active
+        .lock()
+        .map_err(|_| "AI stream state lock poisoned".to_string())?;
 
-    #[cfg(windows)]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Failed to launch {curl_bin}: {e}"))?;
-
-    let Some(stdout) = child.stdout.take() else {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err("Failed to attach curl stdout".to_string());
-    };
-    let stderr = child.stderr.take();
-
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(config_stdin.as_bytes());
-        let _ = stdin.flush();
-    }
-
-    let pid = child.id();
-    if let Ok(mut guard) = ai_state.active_pid.lock() {
-        *guard = Some(pid);
-    }
-    let pid_guard = PidClearGuard {
-        active_pid: Arc::clone(&ai_state.active_pid),
-        pid,
-    };
-
-    thread::spawn(move || {
-        let _tmp_guard = tmp_guard;
-        let _pid_guard = pid_guard;
+    let handle = tauri::async_runtime::spawn(async move {
+        let _stream_guard = StreamClearGuard {
+            active: active_for_guard,
+            id: stream_id,
+        };
         let mut completion_guard = StreamCompletionGuard {
             app: app.clone(),
             request_id: request_id.clone(),
+            cancelled: Arc::clone(&cancelled_task),
             finished: false,
         };
-        let mut reader = BufReader::new(stdout);
-        let mut buf = Vec::new();
-        let mut http_status: u16 = 0;
+
+        let mut resp = match req_builder.send().await {
+            Ok(r) => r,
+            Err(err) => {
+                completion_guard.finished = true;
+                if !cancelled_task.load(Ordering::SeqCst) {
+                    let _ = app.emit(
+                        "ai-stream",
+                        AiStreamEvent {
+                            request_id,
+                            kind: "error".to_string(),
+                            text: err.to_string(),
+                            finish_reason: None,
+                        },
+                    );
+                }
+                return;
+            }
+        };
+
+        let status = resp.status().as_u16();
+        if status >= 400 {
+            let err_body = resp.text().await.unwrap_or_default();
+            let msg = extract_http_error_message(&err_body);
+            completion_guard.finished = true;
+            let _ = app.emit(
+                "ai-stream",
+                AiStreamEvent {
+                    request_id,
+                    kind: "error".to_string(),
+                    text: format!("HTTP {status}: {msg}"),
+                    finish_reason: None,
+                },
+            );
+            return;
+        }
+
+        let mut pending = Vec::new();
         let mut emitted_any_delta = false;
         let mut finish_reason: Option<String> = None;
         let mut raw_non_sse = String::new();
 
         loop {
-            buf.clear();
-            match reader.read_until(b'\n', &mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {
-                    let line_lossy = String::from_utf8_lossy(&buf);
-                    let line = line_lossy.trim_end_matches(['\r', '\n']);
-
-                    if let Some(code_str) = line.strip_prefix(HTTP_STATUS_MARKER) {
-                        if let Ok(code) = code_str.trim().parse::<u16>() {
-                            http_status = code;
-                        }
-                        continue;
+            match resp.chunk().await {
+                Ok(Some(chunk)) => {
+                    for line in drain_sse_lines(&mut pending, chunk.as_ref()) {
+                        process_sse_line(
+                            &line,
+                            &provider,
+                            &request_id,
+                            &app,
+                            &mut emitted_any_delta,
+                            &mut finish_reason,
+                            &mut raw_non_sse,
+                        );
                     }
-
-                    if let Some(data_raw) = line.strip_prefix("data:") {
-                        let data = data_raw.trim();
-                        if data.is_empty() || data == "[DONE]" {
-                            continue;
-                        }
-                        if let Some(reason) = parse_sse_finish_reason(&provider, data) {
-                            finish_reason = Some(reason);
-                        }
-                        if let Some(delta) = parse_sse_delta(&provider, data) {
-                            emitted_any_delta = true;
-                            let _ = app.emit(
-                                "ai-stream",
-                                AiStreamEvent {
-                                    request_id: request_id.clone(),
-                                    kind: "delta".to_string(),
-                                    text: delta,
-                                    finish_reason: None,
-                                },
-                            );
-                        }
-                    } else if !line.trim().is_empty() && raw_non_sse.len() < 16384 {
-                        if !raw_non_sse.is_empty() {
-                            raw_non_sse.push('\n');
-                        }
-                        raw_non_sse.push_str(line);
+                }
+                Ok(None) => break,
+                Err(err) => {
+                    if !cancelled_task.load(Ordering::SeqCst) && !emitted_any_delta {
+                        completion_guard.finished = true;
+                        let _ = app.emit(
+                            "ai-stream",
+                            AiStreamEvent {
+                                request_id,
+                                kind: "error".to_string(),
+                                text: err.to_string(),
+                                finish_reason: None,
+                            },
+                        );
+                        return;
                     }
+                    break;
                 }
             }
         }
 
-        let stderr_text = stderr
-            .map(|mut s| {
-                let mut err_str = String::new();
-                let _ = std::io::Read::read_to_string(&mut s, &mut err_str);
-                err_str
-            })
-            .unwrap_or_default();
-
-        let status = child.wait();
-        let exit_ok = status.map(|s| s.success()).unwrap_or(false);
-
-        if http_status >= 400 {
-            let msg = extract_http_error_message(&raw_non_sse);
-            completion_guard.finished = true;
-            let _ = app.emit(
-                "ai-stream",
-                AiStreamEvent {
-                    request_id,
-                    kind: "error".to_string(),
-                    text: format!("HTTP {http_status}: {msg}"),
-                    finish_reason: None,
-                },
+        if let Some(line) = flush_sse_remainder(&mut pending) {
+            process_sse_line(
+                &line,
+                &provider,
+                &request_id,
+                &app,
+                &mut emitted_any_delta,
+                &mut finish_reason,
+                &mut raw_non_sse,
             );
-            return;
-        }
-
-        if !exit_ok && !emitted_any_delta {
-            let msg = if !stderr_text.trim().is_empty() {
-                stderr_text.trim().to_string()
-            } else {
-                "AI request cancelled or failed".to_string()
-            };
-            completion_guard.finished = true;
-            let _ = app.emit(
-                "ai-stream",
-                AiStreamEvent {
-                    request_id,
-                    kind: "error".to_string(),
-                    text: msg,
-                    finish_reason: None,
-                },
-            );
-            return;
         }
 
         if !emitted_any_delta && !raw_non_sse.trim().is_empty() {
@@ -621,14 +616,21 @@ pub fn start_chat_stream(
         );
     });
 
+    *guard = Some(ActiveStream {
+        id: stream_id,
+        handle,
+        cancelled,
+    });
+
     Ok(())
 }
 
 /// Cancels any active streaming AI request.
 pub fn cancel_stream(ai_state: &AiState) {
-    if let Ok(mut guard) = ai_state.active_pid.lock() {
-        if let Some(pid) = guard.take() {
-            kill_process_tree(pid);
+    if let Ok(mut guard) = ai_state.active.lock() {
+        if let Some(stream) = guard.take() {
+            stream.cancelled.store(true, Ordering::SeqCst);
+            stream.handle.abort();
         }
     }
 }
@@ -869,5 +871,31 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn sse_chunk_framing_handles_split_crlf_utf8_and_trailing_lines() {
+        let mut pending = Vec::new();
+        let emoji_bytes = "🚀日本語".as_bytes();
+        let mut part1 = b"data: {\"text\":\"hi ".to_vec();
+        part1.extend_from_slice(&emoji_bytes[..2]); // split multi-byte UTF-8 char across chunks
+
+        let lines1 = drain_sse_lines(&mut pending, &part1);
+        assert!(lines1.is_empty());
+
+        let mut part2 = emoji_bytes[2..].to_vec();
+        part2.extend_from_slice(b"\"}\r\ndata: [DONE]\r\n{\"fallback\":true");
+        let lines2 = drain_sse_lines(&mut pending, &part2);
+        assert_eq!(
+            lines2,
+            vec![
+                "data: {\"text\":\"hi 🚀日本語\"}".to_string(),
+                "data: [DONE]".to_string(),
+            ]
+        );
+
+        let rem = flush_sse_remainder(&mut pending);
+        assert_eq!(rem.as_deref(), Some("{\"fallback\":true"));
+        assert!(flush_sse_remainder(&mut pending).is_none());
     }
 }

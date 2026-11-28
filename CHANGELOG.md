@@ -24,8 +24,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), foc
   - Added [`docs/index.html`](docs/index.html), [`docs/og-card.svg`](docs/og-card.svg), [`docs/robots.txt`](docs/robots.txt), [`docs/sitemap.xml`](docs/sitemap.xml), and [`docs/SEO_CHECKLIST.md`](docs/SEO_CHECKLIST.md) with `SoftwareApplication` and `FAQPage` JSON-LD metadata.
 - **MCP Graph Enrichment (`core-engine/src/mcp.rs`, `core-engine/src/vault.rs`)**:
   - Extended `get_vault_graph` output with node `kind` (`note` / `skill` / `ghost`), `skill_slug`, `folder`, `in_degree`, `out_degree`, `est_tokens`, and directed edge citation `weight`.
+- **MCP `--read-only` Mode, `SECURITY.md` & Release Provenance (`core-engine/src/main.rs`, `core-engine/src/mcp.rs`, `.github/workflows/release.yml`)**:
+  - Added `--read-only` CLI flag for `--mcp` to omit `create_note` and `append_to_note` from `tools/list` and reject write calls server-side.
+  - Added [`SECURITY.md`](SECURITY.md) documenting DPAPI threat boundaries, native TLS transport, MCP guardrails, and release verification, plus GitHub Build Provenance Attestations (`actions/attest-build-provenance`) in [`release.yml`](.github/workflows/release.yml).
 
 ### Changed
+- **In-Process Native Rust HTTP/TLS AI Client (`core-engine/src/ai/`)**:
+  - Replaced `curl.exe` subprocesses and `%TEMP%` request-body staging with in-process streaming via `reqwest` (`native-tls` / Windows Schannel + `system-proxy`) across chat SSE streaming and live model discovery.
 - **Single Clean `<--->` & `--->` Arrows + Strength Color Coding (`ui/graph.js`)**:
   - Replaced duplicate curved incoming/outgoing wires between two connected notes with a single consolidated **bidirectional (`<--->`)** or **one-way (`--->`)** arrow.
   - Color-coded edges semantically by composite tie strength (`tieScore` combining citation counts, mutual links, and shared neighbors): **Emerald Green** (`tieScore >= 4.0`, strong tie), **Accent Blue** (`tieScore >= 2.5`, mutual/medium tie), and **Calm Slate** (`tieScore < 2.5`, passing mention), with line thickness scaling smoothly by `log2(totalWeight)`.

@@ -19,6 +19,12 @@ use std::path::Path;
 
 const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 
+/// Runtime options for the Skillweaver stdio MCP server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct McpOptions {
+    pub read_only: bool,
+}
+
 fn jsonrpc_result(id: &Value, result: &Value) -> String {
     serde_json::to_string(&json!({
         "jsonrpc": "2.0",
@@ -96,9 +102,9 @@ fn validate_mcp_rel_path(rel: &str, require_md_or_title: bool) -> Result<String,
     Ok(norm)
 }
 
-fn tools_definitions() -> Value {
-    json!([
-        {
+fn tools_definitions(read_only: bool) -> Value {
+    let mut tools = vec![
+        json!({
             "name": "list_notes",
             "description": "List all Markdown (.md) notes in the opened Skillweaver vault with their relative paths, titles, and wikilink targets.",
             "inputSchema": {
@@ -106,8 +112,8 @@ fn tools_definitions() -> Value {
                 "properties": {},
                 "additionalProperties": false
             }
-        },
-        {
+        }),
+        json!({
             "name": "read_note",
             "description": "Read the raw Markdown contents of a note (and optionally its incoming backlinks). Accepts exact relative paths or wikilink targets.",
             "inputSchema": {
@@ -125,8 +131,8 @@ fn tools_definitions() -> Value {
                 "required": ["rel_path"],
                 "additionalProperties": false
             }
-        },
-        {
+        }),
+        json!({
             "name": "search_vault",
             "description": "Search across all notes in the Skillweaver vault by keyword/phrase, returning scored matches and context snippets.",
             "inputSchema": {
@@ -146,8 +152,8 @@ fn tools_definitions() -> Value {
                 "required": ["query"],
                 "additionalProperties": false
             }
-        },
-        {
+        }),
+        json!({
             "name": "resolve_block",
             "description": "Resolve a page reference, heading section ('page#Heading'), or block anchor ('page#^block-id') to its exact Markdown content.",
             "inputSchema": {
@@ -165,8 +171,8 @@ fn tools_definitions() -> Value {
                 "required": ["target_ref"],
                 "additionalProperties": false
             }
-        },
-        {
+        }),
+        json!({
             "name": "get_vault_graph",
             "description": "Return the vault link graph including node kind ('note' | 'skill' | 'ghost'), skill_slug, folder, in_degree, out_degree, est_tokens, and edge citation weight so LLMs can inspect relationship strengths, hubs, and cluster token budgets in one call.",
             "inputSchema": {
@@ -174,8 +180,11 @@ fn tools_definitions() -> Value {
                 "properties": {},
                 "additionalProperties": false
             }
-        },
-        {
+        }),
+    ];
+
+    if !read_only {
+        tools.push(json!({
             "name": "create_note",
             "description": "Create a new Markdown note inside the vault (rejects overwrites and path traversal).",
             "inputSchema": {
@@ -193,8 +202,8 @@ fn tools_definitions() -> Value {
                 "required": ["rel_path"],
                 "additionalProperties": false
             }
-        },
-        {
+        }));
+        tools.push(json!({
             "name": "append_to_note",
             "description": "Append Markdown content to the end of an existing note in the vault.",
             "inputSchema": {
@@ -212,11 +221,19 @@ fn tools_definitions() -> Value {
                 "required": ["rel_path", "content"],
                 "additionalProperties": false
             }
-        }
-    ])
+        }));
+    }
+
+    Value::Array(tools)
 }
 
-fn call_tool(vault_root: &Path, name: &str, args: &Value) -> Value {
+fn call_tool(vault_root: &Path, name: &str, args: &Value, options: McpOptions) -> Value {
+    if options.read_only && matches!(name, "create_note" | "append_to_note") {
+        return tool_err_text(
+            "Write tools are disabled because Skillweaver MCP is running in --read-only mode.",
+        );
+    }
+
     match name {
         "list_notes" => match vault::list_pages(vault_root) {
             Ok(pages) => tool_ok_json(&json!({ "notes": pages })),
@@ -370,9 +387,13 @@ fn call_tool(vault_root: &Path, name: &str, args: &Value) -> Value {
     }
 }
 
-/// Processes a single JSON-RPC 2.0 request/notification line for the Skillweaver MCP server.
+/// Processes a single JSON-RPC 2.0 request/notification line with configurable server options.
 /// Returns `None` for notifications or blank lines (which must not emit a response).
-pub fn handle_jsonrpc_line(vault_root: &Path, line: &str) -> Option<String> {
+pub fn handle_jsonrpc_line_with_options(
+    vault_root: &Path,
+    line: &str,
+    options: McpOptions,
+) -> Option<String> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return None;
@@ -428,6 +449,11 @@ pub fn handle_jsonrpc_line(vault_root: &Path, line: &str) -> Option<String> {
             } else {
                 MCP_PROTOCOL_VERSION
             };
+            let instructions = if options.read_only {
+                "Skillweaver local-first Markdown vault MCP server (read-only mode). Read, search, resolve block anchors (#^block-id), and inspect the wikilink graph."
+            } else {
+                "Skillweaver local-first Markdown vault MCP server. Read, search, resolve block anchors (#^block-id), inspect the wikilink graph, and create or append notes."
+            };
             jsonrpc_result(
                 &id,
                 &json!({
@@ -441,12 +467,15 @@ pub fn handle_jsonrpc_line(vault_root: &Path, line: &str) -> Option<String> {
                         "name": "skillweaver",
                         "version": env!("CARGO_PKG_VERSION")
                     },
-                    "instructions": "Skillweaver local-first Markdown vault MCP server. Read, search, resolve block anchors (#^block-id), inspect the wikilink graph, and create or append notes."
+                    "instructions": instructions
                 }),
             )
         }
         "ping" => jsonrpc_result(&id, &json!({})),
-        "tools/list" => jsonrpc_result(&id, &json!({ "tools": tools_definitions() })),
+        "tools/list" => jsonrpc_result(
+            &id,
+            &json!({ "tools": tools_definitions(options.read_only) }),
+        ),
         "tools/call" => {
             let Some(name) = params.get("name").and_then(Value::as_str) else {
                 return Some(jsonrpc_error(
@@ -459,7 +488,7 @@ pub fn handle_jsonrpc_line(vault_root: &Path, line: &str) -> Option<String> {
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            jsonrpc_result(&id, &call_tool(vault_root, name, &args))
+            jsonrpc_result(&id, &call_tool(vault_root, name, &args, options))
         }
         _ => jsonrpc_error(&id, -32601, &format!("Method not found: {method}")),
     };
@@ -467,8 +496,14 @@ pub fn handle_jsonrpc_line(vault_root: &Path, line: &str) -> Option<String> {
     Some(response)
 }
 
+/// Processes a single JSON-RPC 2.0 request/notification line for the Skillweaver MCP server.
+/// Returns `None` for notifications or blank lines (which must not emit a response).
+pub fn handle_jsonrpc_line(vault_root: &Path, line: &str) -> Option<String> {
+    handle_jsonrpc_line_with_options(vault_root, line, McpOptions::default())
+}
+
 /// Runs the blocking newline-delimited MCP JSON-RPC 2.0 server over stdin/stdout.
-pub fn run_stdio(vault_root: &Path) -> Result<(), String> {
+pub fn run_stdio_with_options(vault_root: &Path, options: McpOptions) -> Result<(), String> {
     if !vault_root.is_dir() {
         return Err(format!(
             "Vault folder does not exist: {}",
@@ -482,7 +517,7 @@ pub fn run_stdio(vault_root: &Path) -> Result<(), String> {
 
     for line_res in stdin.lock().lines() {
         let line = line_res.map_err(|e| format!("Failed reading stdin: {e}"))?;
-        if let Some(reply) = handle_jsonrpc_line(vault_root, &line) {
+        if let Some(reply) = handle_jsonrpc_line_with_options(vault_root, &line, options) {
             writeln!(out, "{reply}").map_err(|e| format!("Failed writing stdout: {e}"))?;
             out.flush()
                 .map_err(|e| format!("Failed flushing stdout: {e}"))?;
@@ -490,6 +525,11 @@ pub fn run_stdio(vault_root: &Path) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Runs the blocking newline-delimited MCP JSON-RPC 2.0 server over stdin/stdout with default options.
+pub fn run_stdio(vault_root: &Path) -> Result<(), String> {
+    run_stdio_with_options(vault_root, McpOptions::default())
 }
 
 #[cfg(test)]
@@ -698,6 +738,76 @@ mod tests {
                 "expected error for {tool}({rel})"
             );
         }
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn mcp_read_only_mode_hides_and_blocks_write_tools() {
+        let root = temp_vault("readonly");
+        vault::create_note(&root, "existing").unwrap();
+        vault::write_note(&root, "existing.md", "Original").unwrap();
+        let opts = McpOptions { read_only: true };
+
+        let init_req = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#;
+        let init_resp: Value =
+            serde_json::from_str(&handle_jsonrpc_line_with_options(&root, init_req, opts).unwrap())
+                .unwrap();
+        assert!(init_resp["result"]["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("read-only"));
+
+        let list_req = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#;
+        let list_resp: Value =
+            serde_json::from_str(&handle_jsonrpc_line_with_options(&root, list_req, opts).unwrap())
+                .unwrap();
+        let names: Vec<&str> = list_resp["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "list_notes",
+                "read_note",
+                "search_vault",
+                "resolve_block",
+                "get_vault_graph"
+            ]
+        );
+
+        for (tool, rel) in [
+            ("create_note", "blocked.md"),
+            ("append_to_note", "existing.md"),
+        ] {
+            let req = json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": tool,
+                    "arguments": { "rel_path": rel, "content": "should not write" }
+                }
+            });
+            let resp: Value = serde_json::from_str(
+                &handle_jsonrpc_line_with_options(&root, &req.to_string(), opts).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(resp["result"]["isError"], true);
+            assert!(resp["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("--read-only"));
+        }
+
+        assert!(!root.join("blocked.md").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("existing.md")).unwrap(),
+            "Original"
+        );
 
         let _ = fs::remove_dir_all(&root);
     }

@@ -18,20 +18,10 @@ use std::cmp::Ordering as CmpOrdering;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
-
-use super::http::{
-    build_curl_config_stdin, curl_binary, extract_http_error_message, status_write_out_arg,
-    HTTP_STATUS_MARKER,
-};
-#[cfg(windows)]
-use crate::fs_util::CREATE_NO_WINDOW;
+use super::http::{apply_headers, build_http_client, extract_http_error_message};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AiModelInfo {
@@ -671,70 +661,26 @@ pub fn parse_models_response(provider: &str, body: &str) -> Result<Vec<AiModelIn
 }
 
 /// Fetches the live model list from the configured provider and updates `~/.skillweaver/cache/models.json`.
-pub fn list_models(req: &AiListModelsRequest) -> Result<CachedModelList, String> {
+pub async fn list_models(req: &AiListModelsRequest) -> Result<CachedModelList, String> {
     let http_req = build_list_models_request(req)?;
-    let config_stdin = build_curl_config_stdin(&http_req.url, &http_req.headers);
+    let client = build_http_client(Duration::from_secs(12), Duration::from_secs(25))?;
+    let req_builder = apply_headers(client.get(&http_req.url), &http_req.headers)?;
+    let resp = req_builder
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch models: {e}"))?;
+    let status = resp.status();
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| format!("Failed reading models response: {e}"))?;
 
-    let curl_bin = curl_binary();
-    let write_out = status_write_out_arg();
-    let mut cmd = Command::new(curl_bin);
-    cmd.args([
-        "-sS",
-        "--connect-timeout",
-        "12",
-        "--max-time",
-        "25",
-        "-K",
-        "-",
-        "-w",
-        &write_out,
-    ])
-    .stdin(Stdio::piped())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped());
-
-    #[cfg(windows)]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Failed to launch {curl_bin}: {e}"))?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(config_stdin.as_bytes());
-        let _ = stdin.flush();
-    }
-
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("Failed waiting for {curl_bin}: {e}"))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut http_status: u16 = 0;
-    let mut body_lines = Vec::new();
-    for line in stdout.lines() {
-        if let Some(code_str) = line.strip_prefix(HTTP_STATUS_MARKER) {
-            if let Ok(code) = code_str.trim().parse::<u16>() {
-                http_status = code;
-            }
-        } else {
-            body_lines.push(line);
-        }
-    }
-    let body = body_lines.join("\n");
-
-    if http_status >= 400 {
+    if !status.is_success() {
         return Err(format!(
-            "HTTP {http_status}: {}",
+            "HTTP {}: {}",
+            status.as_u16(),
             extract_http_error_message(&body)
         ));
-    }
-    if !output.status.success() && body.trim().is_empty() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if stderr.is_empty() {
-            "Failed to fetch models".to_string()
-        } else {
-            stderr
-        });
     }
 
     let models = parse_models_response(&req.provider, &body)?;

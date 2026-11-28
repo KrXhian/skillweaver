@@ -53,7 +53,7 @@
         "description": "Local-first desktop Markdown editor combining Notion-style structured blocks with plain .md folder management, citation-weighted local knowledge graphs with bidirectional strength-coded relationship arrows, Windows DPAPI multi-key BYOK AI, reusable SKILL.md workflows, live external agent hot-reloading, and a built-in stdio MCP server with edge citation weights.",
         "author": {
           "@type": "Organization",
-          "name": "Blue Frog Foundation"
+          "name": "Blue Frog Foundation (maintained by KrXhian)"
         },
         "offers": {
           "@type": "Offer",
@@ -69,7 +69,7 @@
             "name": "What is Skillweaver desktop Markdown editor?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "Skillweaver is a local-first Windows desktop Markdown editor built with Rust and Tauri v2 by the Blue Frog Foundation. It stores notes purely as plain .md files inside regular folders while providing structured block editing, side-docked and fullscreen citation-weighted knowledge graphs, multi-key BYOK AI, reusable SKILL.md workflows, an integrated terminal, and a zero-dependency stdio MCP server."
+              "text": "Skillweaver is a local-first Windows desktop Markdown editor built with Rust and Tauri v2 by Blue Frog Foundation (maintained by KrXhian). It stores notes purely as plain .md files inside regular folders while providing structured block editing, side-docked and fullscreen citation-weighted knowledge graphs, multi-key BYOK AI, reusable SKILL.md workflows, an integrated terminal, and a zero-dependency stdio MCP server."
             }
           },
           {
@@ -77,7 +77,7 @@
             "name": "How is Skillweaver different from Obsidian and Notion?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "Unlike Notion, all Skillweaver notes live locally in plain Markdown folders with zero cloud lock-in. Unlike Obsidian, Skillweaver includes structured blocks, outdenting, a citation-weighted local relationship graph with strength-coded bidirectional arrows, multi-provider BYOK AI, live token telemetry, portable SKILL.md workflows, and an MCP server natively out of the box without plugin soup or Electron memory overhead."
+              "text": "Unlike Notion, all Skillweaver notes live locally in plain Markdown folders without a proprietary cloud database. Unlike Obsidian's plugin-driven model, Skillweaver includes structured blocks, outdenting, a citation-weighted local relationship graph with strength-coded bidirectional arrows, multi-provider BYOK AI, live token telemetry, portable SKILL.md workflows, and an MCP server natively out of the box in a lightweight Rust + WebView2 desktop binary without needing to assemble a separate plugin stack."
             }
           },
           {
@@ -344,6 +344,7 @@
         <a href="#features">Features</a>
         <a href="#comparison">Comparison</a>
         <a href="#mcp">MCP Server</a>
+        <a href="#security">Security</a>
         <a href="#faq">FAQ</a>
         <a href="https://github.com/KrXhian/skillweaver">GitHub</a>
       </nav>
@@ -361,7 +362,7 @@
         <a class="btn-primary" href="https://github.com/KrXhian/skillweaver/releases">Download Windows Executable</a>
         <a class="btn-secondary" href="https://github.com/KrXhian/skillweaver">View Source on GitHub</a>
       </div>
-      <div class="meta-strip">Created by the Blue Frog Foundation &middot; Portable <code>skillweaver.exe</code> &middot; No installer or cloud account required</div>
+      <div class="meta-strip">An open-source project by Blue Frog Foundation (maintained by @KrXhian) &middot; Portable <code>skillweaver.exe</code> &middot; Apache-2.0</div>
     </section>
 
     <section id="features" class="band">
@@ -416,11 +417,11 @@
               <td>Partial (outliner)</td>
             </tr>
             <tr>
-              <td>Core Features Built In (Zero Plugin Slop)</td>
+              <td>Built-In Core Workflow (No Plugins Required)</td>
               <td>Yes</td>
-              <td>Needs plugins</td>
+              <td>Via plugins</td>
               <td>Cloud SaaS</td>
-              <td>Needs plugins</td>
+              <td>Via plugins</td>
             </tr>
             <tr>
               <td>Citation-Weighted Knowledge Graph</td>
@@ -459,17 +460,38 @@
     }
   }
 }</code></pre>
+      <p style="color: var(--muted); margin: 12px 0 0; font-size: 14px;">
+        Want read-only inspection first? Pass <code>["--mcp", "--read-only", "C:\\path\\to\\your-markdown-folder"]</code> to omit write tools (<code>create_note</code> and <code>append_to_note</code>). All MCP paths enforce traversal guards, <code>.md</code>-only access, and dotfile blocking (<code>.git</code>, <code>.env</code>, <code>.skillweaver</code>).
+      </p>
+    </section>
+
+    <section id="security" class="band">
+      <h2>Security &amp; Known Tradeoffs</h2>
+      <div class="grid">
+        <article class="card">
+          <h3>Native Rust HTTP/TLS &amp; Windows DPAPI</h3>
+          <p>BYOK requests stream in-process via <code>reqwest</code> over Windows Schannel TLS (no external <code>curl</code> subprocesses or temp prompt files). Keys are encrypted individually at rest via Windows DPAPI, protecting against other OS users while sharing your active user session boundary.</p>
+        </article>
+        <article class="card">
+          <h3>MCP Guardrails &amp; <code>--read-only</code> Mode</h3>
+          <p>External agents can only access non-hidden <code>.md</code> notes inside the opened folder, with no delete or full-overwrite tools. Use <code>--read-only</code> or pair write access with Git backups.</p>
+        </article>
+        <article class="card">
+          <h3>Windows-First &amp; Verifiable CI Releases</h3>
+          <p>Packaged for Windows 10/11 (WebView2, PowerShell, Win32 DPAPI) with block-level HTML comment metadata (<code>&lt;!-- outdent:N --&gt;</code>, <code>&lt;!-- style:... --&gt;</code>). Releases are built in GitHub Actions with <code>SHA256SUMS.txt</code> and build provenance attestations — see <a href="https://github.com/KrXhian/skillweaver/blob/main/SECURITY.md">SECURITY.md</a>.</p>
+        </article>
+      </div>
     </section>
 
     <section id="faq" class="band">
       <h2>Frequently Asked Questions</h2>
       <div class="faq-item">
         <h3>What is Skillweaver desktop Markdown editor?</h3>
-        <p>Skillweaver is a local-first Windows desktop Markdown editor built with Rust and Tauri v2 by the Blue Frog Foundation. It stores notes purely as plain <code>.md</code> files inside regular folders while providing structured block editing, side-docked and fullscreen citation-weighted knowledge graphs, multi-key BYOK AI, reusable <code>SKILL.md</code> workflows, an integrated terminal, and a zero-dependency stdio MCP server.</p>
+        <p>Skillweaver is a local-first Windows desktop Markdown editor built with Rust and Tauri v2 by Blue Frog Foundation (maintained by @KrXhian). It stores notes purely as plain <code>.md</code> files inside regular folders while providing structured block editing, side-docked and fullscreen citation-weighted knowledge graphs, multi-key BYOK AI, reusable <code>SKILL.md</code> workflows, an integrated terminal, and a zero-dependency stdio MCP server.</p>
       </div>
       <div class="faq-item">
         <h3>How is Skillweaver different from Obsidian and Notion?</h3>
-        <p>Unlike Notion, all Skillweaver notes live locally in plain Markdown folders with zero cloud lock-in. Unlike Obsidian, Skillweaver includes structured blocks, outdenting, a citation-weighted local relationship graph with strength-coded bidirectional arrows, multi-provider BYOK AI, live token telemetry, portable <code>SKILL.md</code> workflows, and an MCP server natively out of the box without plugin soup or Electron memory overhead.</p>
+        <p>Unlike Notion, all Skillweaver notes live locally in plain Markdown folders without a proprietary cloud database. Unlike Obsidian's plugin-driven model, Skillweaver includes structured blocks, outdenting, a citation-weighted local relationship graph with strength-coded bidirectional arrows, multi-provider BYOK AI, live token telemetry, portable <code>SKILL.md</code> workflows, and an MCP server natively out of the box in a lightweight Rust + WebView2 desktop binary without needing to assemble a separate plugin stack.</p>
       </div>
       <div class="faq-item">
         <h3>Can external AI agents connect to Skillweaver vaults via MCP?</h3>
@@ -482,8 +504,8 @@
     </section>
 
     <footer>
-      <span>Skillweaver&trade; &middot; Blue Frog Foundation &middot; Apache-2.0 License</span>
-      <span><a href="https://github.com/KrXhian/skillweaver">GitHub Repository</a> &middot; <a href="https://github.com/KrXhian/skillweaver/releases">Releases</a> &middot; <a href="https://github.com/KrXhian/skillweaver/blob/main/CHANGELOG.md">Changelog</a></span>
+      <span>Skillweaver &middot; Blue Frog Foundation (@KrXhian) &middot; Apache-2.0 License</span>
+      <span><a href="https://github.com/KrXhian/skillweaver">GitHub Repository</a> &middot; <a href="https://github.com/KrXhian/skillweaver/releases">Releases</a> &middot; <a href="https://github.com/KrXhian/skillweaver/blob/main/CHANGELOG.md">Changelog</a> &middot; <a href="https://github.com/KrXhian/skillweaver/blob/main/SECURITY.md">Security</a></span>
     </footer>
   </main>
 </body>

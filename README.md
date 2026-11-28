@@ -9,15 +9,15 @@
 
 > **A fast, local-first Notion & Obsidian alternative built over plain `.md` folders — combining structured block editing, side-by-side & fullscreen citation-weighted knowledge graphs (`<--->` / `--->` strength colors), multi-key BYOK AI, reusable `SKILL.md` agent workflows, and a zero-dependency MCP server in a single Rust + Tauri desktop binary.**
 
-*Skillweaver™ — Created by the Blue Frog Foundation. Official repository, releases & changelog: [github.com/KrXhian/skillweaver](https://github.com/KrXhian/skillweaver) · [krxhian.github.io/skillweaver](https://krxhian.github.io/skillweaver/) · [CHANGELOG](CHANGELOG.md)*
+*Skillweaver — An open-source project by Blue Frog Foundation (created & maintained by [@KrXhian](https://github.com/KrXhian)). Releases, docs, changelog & security: [github.com/KrXhian/skillweaver](https://github.com/KrXhian/skillweaver) · [krxhian.github.io/skillweaver](https://krxhian.github.io/skillweaver/) · [CHANGELOG](CHANGELOG.md) · [SECURITY](SECURITY.md)*
 
 ---
 
 ## What Is Skillweaver?
 
-**Skillweaver** is a native Windows desktop Markdown knowledge base and AI-ready editor designed around **zero lock-in** and **zero plugin bloat**. Every note is stored directly on disk as standard human- and LLM-readable Markdown (`.md`), while giving you structured Notion-like blocks, Obsidian-style `[[wikilinks]]` and knowledge graphs, collapsible outlines, an integrated terminal, and multi-provider BYOK AI without needing third-party community plugins or Electron overhead.
+**Skillweaver** is a native Windows desktop Markdown knowledge base and AI-ready editor built around **plain-file portability** and an **integrated core workflow**. Every note is stored directly on disk as standard human- and LLM-readable Markdown (`.md`), while giving you structured Notion-like blocks, Obsidian-style `[[wikilinks]]` and knowledge graphs, collapsible outlines, an integrated terminal, and multi-provider BYOK AI in a self-contained Rust + Tauri v2 desktop binary.
 
-*(Note: This project is the **Skillweaver desktop Markdown editor & PKM workspace by Blue Frog Foundation**, built in Rust and Tauri v2.)*
+*(Note: This is the **Skillweaver desktop Markdown editor & knowledge workspace** by Blue Frog Foundation, maintained by `@KrXhian` — distinct from the OSU-NLP-Group SkillWeaver web-agent research repository.)*
 
 ---
 
@@ -26,13 +26,13 @@
 | Capability | Skillweaver | Obsidian | Notion | Logseq |
 | :--- | :--- | :--- | :--- | :--- |
 | **Plain `.md` Files on Disk** | Yes (100% local folders) | Yes (local Markdown) | No (proprietary cloud DB) | Partial (outliner `.md`/EDN) |
-| **Zero-Plugin Built-In Stack** | Core blocks, graph, BYOK AI, terminal & MCP built in | Requires installing community plugins | SaaS workspace | Plugin ecosystem needed |
+| **Built-In Core Capabilities** | Blocks, graph, BYOK AI, terminal & MCP included | Available via community plugins | Integrated cloud workspace | Core outliner + plugin ecosystem |
 | **Citation-Weighted Knowledge Graph** | Side (`Ctrl+G`) & fullscreen (`Ctrl+Shift+G`), `[[wikilink]]` citation weights (`×N`), `<--->` / `--->` strength-colored arrows, calm hop muting, 1-click AI cluster loading | Unweighted global/local graph | None | Unweighted graph |
 | **Structured Block Editing + Outdent** | `#`–`###` folding, `Shift+Tab` outdent, resizable tables, block colors | Plain text / Live Preview | Cloud blocks | Bullet outliner |
-| **Multi-Key, Multi-Provider BYOK AI** | Unlimited named API key profiles (DPAPI-encrypted) + 1-click switcher | Paid plugins / third-party | Subscription add-on | Third-party plugins |
+| **Multi-Key, Multi-Provider BYOK AI** | Unlimited named API key profiles (DPAPI-encrypted) + 1-click switcher | Community plugins / third-party | Subscription add-on | Third-party plugins |
 | **Portable `@skill` Workflows** | Standard `skills/*/SKILL.md` instructions | Not native | Not native | Not native |
 | **Live External Agent Co-Editing** | Built-in `--mcp` stdio server + conflict diff resolver | Third-party REST/MCP bridges | API rate-limited | Not native |
-| **Runtime Footprint** | Single Rust + WebView2 `.exe`, zero Node.js runtime | Electron app | Browser / Electron | Electron app |
+| **Runtime Footprint** | Single Rust + WebView2 `.exe` (no bundled Node.js) | Electron desktop app | Web / Electron desktop app | Electron desktop app |
 
 ---
 
@@ -56,7 +56,7 @@
 - **True Fullscreen Explorer (`Ctrl+Shift+G` or `⤢`)**: Expands edge-to-edge across the entire window (`100vw × 100vh`) with folder-color legend filtering, Local 1-hop Subgraph (`L`), `@skill` violet diamond badges, unresolved coral ghost links, and a floating **Node Inspector Card** (`Open/Create Note`, `Focus 1-Hop`, `Ask AI (Node / Cluster)`).
 - **Citation-Frequency Edge Weights (`×N`)**: Repeated `[[wikilink]]` citations between two notes increment directed edge `weight` (`×2`, `×3`, ...) in Rust, pulling strongly tied pages closer in the force simulation, boosting 1-hop relevance, ranking Inspector neighbor chips by citation strength, and rendering midpoint `×N` citation pills on focus/hover.
 - **Single Clean `<--->` & `--->` Arrows + Strength Color Coding**: Consolidates reciprocal links into a single bidirectional arrow (`<--->`) and one-way references into a single directional arrow (`--->`). Relationships are color-coded by composite tie strength (`tieScore` combining citations, mutual links, and shared neighbors) — **Emerald Green** (strong citation/mutual tie), **Accent Blue** (mutual/medium tie), and **Calm Slate** (single passing mention) — with line thickness scaling smoothly by `log2(weight)`.
-- **Unmistakable Active-Page Focus & Calm Muting**: Highlights your currently open page with a crisp double blue ring while proportionally fading and muting distant or unrelated nodes by hop distance and tie strength so the active neighborhood stands out cleanly instead of drowning in a hairball graph.
+- **Unmistakable Active-Page Focus & Calm Muting**: Highlights your currently open page with a crisp double blue ring while proportionally fading and muting distant or unrelated nodes by hop distance and tie strength so the active neighborhood stands out cleanly instead of getting lost in a crowded full-vault graph.
 - **Auto-Reset & Manual Reset (`R`)**: Closing the graph or exiting Fullscreen back to Side resets filters, selection, Local mode, and dragged positions to default automatically — or press `R` / click **Reset** anytime.
 
 ### 5. Multi-Key BYOK AI Assistant & Portable `SKILL.md` Bank
@@ -110,7 +110,7 @@ Skillweaver ships as a single **Tauri v2 desktop binary (`core-engine/`)** with 
 - `core-engine/src/markdown.rs` — Structured block parser/serializer, `[[wikilink]]` rewriter, lazy `^block-id` anchors, outdent, and style metadata.
 - `core-engine/src/watcher.rs` — Debounced recursive `notify` watcher with FNV-1a content-hash self-write suppression.
 - `core-engine/src/mcp.rs` — Zero-dependency JSON-RPC 2.0 MCP server.
-- `core-engine/src/ai/` — Streaming BYOK client (`curl`-backed SSE), live model cache, multi-profile Windows DPAPI prefs, `SKILL.md` skills, and chat history store.
+- `core-engine/src/ai/` — In-process streaming BYOK client (native Rust `reqwest` + OS TLS/Schannel), live model cache, multi-profile Windows DPAPI prefs, `SKILL.md` skills, and chat history store.
 - `core-engine/src/terminal.rs` — Integrated PowerShell host with UTF-8/CP1252 handling and path completion.
 - `ui/` — Vanilla HTML/CSS/ES modules (`app.js`, `editor.js`, `outline.js`, `graph.js`, `folder.js`, `diff.js`, `sidebar.js`, `links.js`, `metrics.js`, `terminal.js`, `ai/`).
 
@@ -143,7 +143,7 @@ cargo test --manifest-path core-engine/Cargo.toml
 cargo clippy --manifest-path core-engine/Cargo.toml --all-targets -- -D warnings
 ```
 
-GitHub Actions in [`.github/workflows/`](.github/workflows) runs `cargo check --all-targets` and `cargo test` on pushes/PRs (`ci.yml`) and builds portable Windows binaries on releases (`release.yml`).
+GitHub Actions in [`.github/workflows/`](.github/workflows) enforces `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo check --all-targets`, and `cargo test` on pushes/PRs (`ci.yml`), and builds portable Windows binaries with `SHA256SUMS.txt` and GitHub build provenance attestations on releases (`release.yml`).
 
 ---
 
@@ -162,7 +162,13 @@ Connect Claude Code, Cursor, Codex, OpenCode, or Antigravity directly to any Ski
 }
 ```
 
-Omit the folder path (`["--mcp"]`) to automatically attach external agents to whichever vault folder was last opened in the desktop app.
+Pass `--read-only` to disable `create_note` and `append_to_note` while keeping read, search, block-resolve, and graph inspection active:
+
+```json
+"args": ["--mcp", "--read-only", "C:\\path\\to\\your-markdown-folder"]
+```
+
+Omit the folder path (`["--mcp"]` or `["--mcp", "--read-only"]`) to automatically attach external agents to whichever vault folder was last opened in the desktop app. The MCP server blocks path traversal, dotfiles (`.git`, `.env`, `.skillweaver`), `node_modules`/`target`, and non-`.md` files, refuses overwrites, and exposes no delete tools — back up your vault with Git when granting write access. See [`SECURITY.md`](SECURITY.md) for the full threat model.
 
 ---
 
@@ -177,13 +183,13 @@ Omit the folder path (`["--mcp"]`) to automatically attach external agents to wh
 ## FAQ
 
 **How is Skillweaver different from Obsidian?**
-Obsidian relies heavily on community plugins for structured block editing, AI chat, skills, terminal access, and MCP integration. Skillweaver ships these core workflows natively in a single Rust + Tauri binary over plain `.md` files with zero plugin compatibility breakage.
+Obsidian excels at deep customization through a broad third-party plugin ecosystem. Skillweaver takes an opinionated, batteries-included approach — shipping structured block editing, citation-weighted graphs, multi-key BYOK AI, `SKILL.md` workflows, a terminal, and `--mcp` support natively in a single Rust + Tauri binary over plain `.md` files with minimal setup.
 
 **Can AI tools like Claude Code or Cursor read and edit my Skillweaver vault directly?**
-Yes. Launch `skillweaver.exe --mcp "<vault>"` in your MCP client config. External edits are detected automatically by Skillweaver's file watcher and hot-reloaded safely without overwriting unsaved typing.
+Yes. Launch `skillweaver.exe --mcp "<vault>"` (or `--mcp --read-only "<vault>"` for read-only exploration) in your MCP client config. External edits are detected automatically by Skillweaver's file watcher and hot-reloaded safely without overwriting unsaved typing.
 
-**How is Skillweaver's knowledge graph different from a traditional full-vault hairball graph?**
-Unweighted 10,000-node graphs turn into unreadable tangles where a single passing mention looks identical to a core dependency. Skillweaver models your vault as a **citation-weighted local relationship network**: repeated `[[wikilinks]]` increase edge weight (`×N`) to pull tightly coupled pages closer, mutual links collapse into single bidirectional `<--->` or one-way `--->` arrows color-coded by relationship strength (emerald green, blue, slate), the active note stands out inside a double blue ring while distant hops calmly mute, and `Ask AI (Cluster)` loads a note's 1-hop neighborhood straight into BYOK AI.
+**How is Skillweaver's knowledge graph different from an unweighted global graph?**
+In unweighted full-vault graphs, a single passing mention looks identical to a core dependency. Skillweaver models your vault as a **citation-weighted local relationship network**: repeated `[[wikilinks]]` increase edge weight (`×N`) to pull tightly coupled pages closer, mutual links collapse into single bidirectional `<--->` or one-way `--->` arrows color-coded by relationship strength (emerald green, blue, slate), the active note stands out inside a double blue ring while distant hops calmly mute, and `Ask AI (Cluster)` loads a note's 1-hop neighborhood straight into BYOK AI.
 
 **Does Skillweaver lock my notes into a proprietary database?**
 No. Every note is a plain `.md` file inside normal OS folders, and pasted images sit in a standard `<vault>/assets/` subfolder. You can open the same folder in VS Code, Obsidian, or Git at any time.
